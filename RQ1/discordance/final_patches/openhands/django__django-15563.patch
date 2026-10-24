@@ -1,0 +1,50 @@
+--- a/django/db/models/sql/subqueries.py
++++ b/django/db/models/sql/subqueries.py
+@@ -1,16 +1,5 @@
+-    def get_related_updates(self):
+-        """
+-        Return a list of query objects: one for each update required to an
+-        ancestor model. Each query will have the same filtering conditions as
+-        the current query but will only update a single table.
+-        """
+-        if not self.related_updates:
+-            return []
+-        result = []
+-        for model, values in self.related_updates.items():
+-            query = UpdateQuery(model)
+-            query.values = values
+-            if self.related_ids is not None:
+-                query.add_filter("pk__in", self.related_ids)
+-            result.append(query)
+-        return result+    def clone(self):
++        obj = super().clone()
++        obj.related_updates = self.related_updates.copy()
++        obj.related_ids_map = self.related_ids_map.copy()
++        return obj--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -6,4 +6,25 @@
+             for rows in query.get_compiler(self.using).execute_sql(MULTI):
+                 idents.extend(r[0] for r in rows)
+             self.query.add_filter("pk__in", idents)
+-            self.query.related_ids = idents+            self.query.related_ids = idents
++            
++            # For multiple inheritance, collect the correct foreign key values
++            # for each parent model
++            if self.query.related_updates:
++                self.query.related_ids_map = {}
++                for model in self.query.related_updates.keys():
++                    parent_link = self.query.get_meta().get_ancestor_link(model)
++                    if parent_link:
++                        # Create a query to get the foreign key values for this parent
++                        fk_query = self.query.chain(klass=Query)
++                        fk_query.select_related = False
++                        fk_query.clear_ordering(force=True)
++                        fk_query.extra = {}
++                        fk_query.select = []
++                        fk_query.add_fields([parent_link.attname])
++                        
++                        # Execute the query to get the foreign key values
++                        fk_idents = []
++                        for rows in fk_query.get_compiler(self.using).execute_sql(MULTI):
++                            fk_idents.extend(r[0] for r in rows)
++                        self.query.related_ids_map[model] = fk_idents

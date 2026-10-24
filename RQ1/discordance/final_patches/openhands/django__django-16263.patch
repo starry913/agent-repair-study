@@ -1,0 +1,68 @@
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1,9 +1,59 @@
+-        return dict(zip(outer_query.annotation_select, result))
+-
+-    def get_count(self, using):
++    def _get_referenced_annotations(self, annotations):
+         """
+-        Perform a COUNT() query using the current filter constraints.
++        Find annotations that are referenced by WHERE clauses, other annotations,
++        or ORDER BY clauses.
+         """
+-        obj = self.clone()
+-        obj.add_annotation(Count("*"), alias="__count", is_summary=True)
+-        return obj.get_aggregation(using, ["__count"])["__count"]+        if not annotations:
++            return set()
++        
++        referenced = set()
++        
++        def collect_refs_from_expression(expr, refs_set):
++            """Recursively collect annotation references from an expression."""
++            if hasattr(expr, 'get_source_expressions'):
++                for source_expr in expr.get_source_expressions():
++                    collect_refs_from_expression(source_expr, refs_set)
++            
++            # Check if this is a Ref to an annotation
++            if isinstance(expr, Ref) and expr.refs in annotations:
++                refs_set.add(expr.refs)
++            
++            # Check if this is an F expression referencing an annotation
++            if hasattr(expr, 'name') and expr.name in annotations:
++                refs_set.add(expr.name)
++            
++            # Handle other expression types that might reference annotations
++            if hasattr(expr, 'children'):
++                for child in expr.children:
++                    collect_refs_from_expression(child, refs_set)
++        
++        # Check WHERE clause for annotation references
++        if self.where:
++            collect_refs_from_expression(self.where, referenced)
++        
++        # Check ORDER BY clause for annotation references
++        for order_expr in self.order_by:
++            if isinstance(order_expr, str):
++                # Handle string-based ordering like 'annotation_name' or '-annotation_name'
++                field_name = order_expr.lstrip('-')
++                if field_name in annotations:
++                    referenced.add(field_name)
++            else:
++                # Handle expression-based ordering
++                collect_refs_from_expression(order_expr, referenced)
++        
++        # Find transitive dependencies: if annotation A references annotation B,
++        # and B is referenced elsewhere, then A is also needed
++        changed = True
++        while changed:
++            changed = False
++            for alias, annotation in annotations.items():
++                if alias not in referenced:
++                    temp_refs = set()
++                    collect_refs_from_expression(annotation, temp_refs)
++                    # Check if this annotation references any already-referenced annotations
++                    if temp_refs.intersection(referenced):
++                        referenced.add(alias)
++                        changed = True
++        
++        return referenced

@@ -1,0 +1,75 @@
+diff --git a/xarray/coding/variables.py b/xarray/coding/variables.py
+index b035ff82..a58f68b7 100644
+--- a/xarray/coding/variables.py
++++ b/xarray/coding/variables.py
+@@ -284,6 +284,12 @@ class CFScaleOffsetCoder(VariableCoder):
+         return Variable(dims, data, attrs, encoding)
+ 
+ 
++def _unsigned_to_signed_float(data):
++    """Convert float values in unsigned byte range to signed byte interpretation."""
++    data = np.asarray(data)
++    return np.where(data >= 128, data - 256, data)
++
++
+ class UnsignedIntegerCoder(VariableCoder):
+     def encode(self, variable, name=None):
+         dims, data, attrs, encoding = unpack_for_encoding(variable)
+@@ -316,12 +322,51 @@ class UnsignedIntegerCoder(VariableCoder):
+                     if "_FillValue" in attrs:
+                         new_fill = unsigned_dtype.type(attrs["_FillValue"])
+                         attrs["_FillValue"] = new_fill
++            elif data.dtype.kind == "u" and unsigned == "false":
++                signed_dtype = np.dtype("i%s" % data.dtype.itemsize)
++                transform = partial(np.asarray, dtype=signed_dtype)
++                data = lazy_elemwise_func(data, transform, signed_dtype)
++                if "_FillValue" in attrs:
++                    new_fill = signed_dtype.type(attrs["_FillValue"])
++                    attrs["_FillValue"] = new_fill
+             else:
+-                warnings.warn(
+-                    "variable %r has _Unsigned attribute but is not "
+-                    "of integer type. Ignoring attribute." % name,
+-                    SerializationWarning,
+-                    stacklevel=3,
+-                )
++                # Handle float32 data representing unsigned byte values (pydap case)
++                if (data.dtype.kind == "f" and 
++                    unsigned == "false" and 
++                    data.dtype.itemsize <= 4):  # float32 or smaller
++                    # Check if data values are in byte range (0-255)
++                    try:
++                        # Use duck_array_ops for compatibility with dask arrays
++                        data_min = duck_array_ops.min(data, skipna=True)
++                        data_max = duck_array_ops.max(data, skipna=True)
++                        if (data_min >= 0 and data_max <= 255 and 
++                            duck_array_ops.allclose_or_equiv(data, np.round(data))):
++                            # Data appears to be integer values in float format within byte range
++                            transform = _unsigned_to_signed_float
++                            data = lazy_elemwise_func(data, transform, data.dtype)
++                        else:
++                            # Data is not in byte range, issue warning
++                            warnings.warn(
++                                "variable %r has _Unsigned attribute but is not "
++                                "of integer type. Ignoring attribute." % name,
++                                SerializationWarning,
++                                stacklevel=3,
++                            )
++                    except (TypeError, AttributeError):
++                        # Fall back to warning if min/max operations fail
++                        warnings.warn(
++                            "variable %r has _Unsigned attribute but is not "
++                            "of integer type. Ignoring attribute." % name,
++                            SerializationWarning,
++                            stacklevel=3,
++                        )
++                else:
++                    # Non-float data or inappropriate float data
++                    warnings.warn(
++                        "variable %r has _Unsigned attribute but is not "
++                        "of integer type. Ignoring attribute." % name,
++                        SerializationWarning,
++                        stacklevel=3,
++                    )
+ 
+         return Variable(dims, data, attrs, encoding)

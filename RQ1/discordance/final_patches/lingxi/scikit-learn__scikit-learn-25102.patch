@@ -1,0 +1,155 @@
+diff --git a/sklearn/utils/_set_output.py b/sklearn/utils/_set_output.py
+index 335773c6a..c340e201b 100644
+--- a/sklearn/utils/_set_output.py
++++ b/sklearn/utils/_set_output.py
+@@ -12,6 +12,7 @@ def _wrap_in_pandas_container(
+     *,
+     columns,
+     index=None,
++    dtypes=None,
+ ):
+     """Create a Pandas DataFrame.
+ 
+@@ -36,6 +37,10 @@ def _wrap_in_pandas_container(
+     index : array-like, default=None
+         Index for data.
+ 
++    dtypes : dict, default=None
++        Dictionary of column names to dtypes. If provided, the returned DataFrame
++        will have these dtypes for the corresponding columns.
++
+     Returns
+     -------
+     dataframe : DataFrame
+@@ -59,7 +64,13 @@ def _wrap_in_pandas_container(
+             data_to_wrap.index = index
+         return data_to_wrap
+ 
+-    return pd.DataFrame(data_to_wrap, index=index, columns=columns)
++    df = pd.DataFrame(data_to_wrap, index=index, columns=columns)
++    if dtypes is not None:
++        # Only apply dtypes for columns that exist in both the DataFrame and dtypes dict
++        for col, dtype in dtypes.items():
++            if col in df.columns:
++                df[col] = df[col].astype(dtype)
++    return df
+ 
+ 
+ def _get_output_config(method, estimator=None):
+@@ -81,6 +92,8 @@ def _get_output_config(method, estimator=None):
+ 
+         - "dense": specifies the dense container for `method`. This can be
+           `"default"` or `"pandas"`.
++        - "preserve_dtypes": bool, whether to preserve dtypes from the
++          original input when creating pandas output.
+     """
+     est_sklearn_output_config = getattr(estimator, "_sklearn_output_config", {})
+     if method in est_sklearn_output_config:
+@@ -93,7 +106,14 @@ def _get_output_config(method, estimator=None):
+             f"output config must be 'default' or 'pandas' got {dense_config}"
+         )
+ 
+-    return {"dense": dense_config}
++    # Get preserve_dtypes config
++    preserve_dtypes_key = f"{method}_preserve_dtypes"
++    if preserve_dtypes_key in est_sklearn_output_config:
++        preserve_dtypes_config = est_sklearn_output_config[preserve_dtypes_key]
++    else:
++        preserve_dtypes_config = False
++
++    return {"dense": dense_config, "preserve_dtypes": preserve_dtypes_config}
+ 
+ 
+ def _wrap_data_with_container(method, data_to_wrap, original_input, estimator):
+@@ -127,10 +147,16 @@ def _wrap_data_with_container(method, data_to_wrap, original_input, estimator):
+         return data_to_wrap
+ 
+     # dense_config == "pandas"
++    dtypes = None
++    if output_config["preserve_dtypes"] and hasattr(original_input, "dtypes"):
++        # Extract dtypes from the original DataFrame
++        dtypes = original_input.dtypes.to_dict()
++
+     return _wrap_in_pandas_container(
+         data_to_wrap=data_to_wrap,
+         index=getattr(original_input, "index", None),
+         columns=estimator.get_feature_names_out,
++        dtypes=dtypes,
+     )
+ 
+ 
+@@ -208,7 +234,7 @@ class _SetOutputMixin:
+             setattr(cls, method, wrapped_method)
+ 
+     @available_if(_auto_wrap_is_configured)
+-    def set_output(self, *, transform=None):
++    def set_output(self, *, transform=None, preserve_dtypes=None):
+         """Set output container.
+ 
+         See :ref:`sphx_glr_auto_examples_miscellaneous_plot_set_output.py`
+@@ -223,22 +249,36 @@ class _SetOutputMixin:
+             - `"pandas"`: DataFrame output
+             - `None`: Transform configuration is unchanged
+ 
++        preserve_dtypes : bool, default=None
++            Whether to preserve dtypes from the original input when creating
++            pandas output. This is only relevant when `transform="pandas"`.
++
++            - `True`: Preserve dtypes for columns that exist in both the
++              original and transformed DataFrames
++            - `False`: Use default pandas dtype inference
++            - `None`: Preserve dtypes configuration is unchanged
++
+         Returns
+         -------
+         self : estimator instance
+             Estimator instance.
+         """
+-        if transform is None:
++        if transform is None and preserve_dtypes is None:
+             return self
+ 
+         if not hasattr(self, "_sklearn_output_config"):
+             self._sklearn_output_config = {}
+ 
+-        self._sklearn_output_config["transform"] = transform
++        if transform is not None:
++            self._sklearn_output_config["transform"] = transform
++        
++        if preserve_dtypes is not None:
++            self._sklearn_output_config["transform_preserve_dtypes"] = preserve_dtypes
++        
+         return self
+ 
+ 
+-def _safe_set_output(estimator, *, transform=None):
++def _safe_set_output(estimator, *, transform=None, preserve_dtypes=None):
+     """Safely call estimator.set_output and error if it not available.
+ 
+     This is used by meta-estimators to set the output for child estimators.
+@@ -256,6 +296,10 @@ def _safe_set_output(estimator, *, transform=None):
+ 
+         If `None`, this operation is a no-op.
+ 
++    preserve_dtypes : bool, default=None
++        Whether to preserve dtypes from the original input when creating
++        pandas output. If `None`, this operation is a no-op.
++
+     Returns
+     -------
+     estimator : estimator instance
+@@ -264,7 +308,7 @@ def _safe_set_output(estimator, *, transform=None):
+     set_output_for_transform = (
+         hasattr(estimator, "transform")
+         or hasattr(estimator, "fit_transform")
+-        and transform is not None
++        and (transform is not None or preserve_dtypes is not None)
+     )
+     if not set_output_for_transform:
+         # If estimator can not transform, then `set_output` does not need to be
+@@ -276,4 +320,4 @@ def _safe_set_output(estimator, *, transform=None):
+             f"Unable to configure output for {estimator} because `set_output` "
+             "is not available."
+         )
+-    return estimator.set_output(transform=transform)
++    return estimator.set_output(transform=transform, preserve_dtypes=preserve_dtypes)

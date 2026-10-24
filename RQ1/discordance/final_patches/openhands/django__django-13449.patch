@@ -1,0 +1,68 @@
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -1,8 +1,58 @@
+-class Window(Expression):
+-    template = '%(expression)s OVER (%(window)s)'
+-    # Although the main expression may either be an aggregate or an
+-    # expression with an aggregate function, the GROUP BY that will
+-    # be introduced in the query as a result is not desired.
+-    contains_aggregate = False
+-    contains_over_clause = True
+-    filterable = False+    def as_sqlite(self, compiler, connection, **extra_context):
++        # For SQLite, we need to apply CAST to the entire window expression
++        # when the output field is DecimalField, not just to the inner expression
++        connection.ops.check_expression_support(self)
++        if not connection.features.supports_over_clause:
++            raise NotSupportedError('This backend does not support window expressions.')
++        
++        # Temporarily disable SQLite casting on the source expression
++        source_expr = self.source_expression
++        original_as_sqlite = getattr(source_expr, 'as_sqlite', None)
++        if original_as_sqlite and hasattr(source_expr, 'as_sql'):
++            # Temporarily replace as_sqlite with as_sql to avoid double casting
++            source_expr.as_sqlite = source_expr.as_sql
++        
++        try:
++            expr_sql, params = compiler.compile(source_expr)
++        finally:
++            # Restore the original as_sqlite method
++            if original_as_sqlite:
++                source_expr.as_sqlite = original_as_sqlite
++        
++        window_sql, window_params = [], []
++
++        if self.partition_by is not None:
++            sql_expr, sql_params = self.partition_by.as_sql(
++                compiler=compiler, connection=connection,
++                template='PARTITION BY %(expressions)s',
++            )
++            window_sql.extend(sql_expr)
++            window_params.extend(sql_params)
++
++        if self.order_by is not None:
++            window_sql.append(' ORDER BY ')
++            order_sql, order_params = compiler.compile(self.order_by)
++            window_sql.extend(order_sql)
++            window_params.extend(order_params)
++
++        if self.frame:
++            frame_sql, frame_params = compiler.compile(self.frame)
++            window_sql.append(' ' + frame_sql)
++            window_params.extend(frame_params)
++
++        params.extend(window_params)
++        template = extra_context.get('template') or self.template
++
++        sql = template % {
++            'expression': expr_sql,
++            'window': ''.join(window_sql).strip()
++        }
++        
++        # Apply CAST to the entire window expression for DecimalField
++        try:
++            if self.output_field.get_internal_type() == 'DecimalField':
++                sql = 'CAST(%s AS NUMERIC)' % sql
++        except FieldError:
++            pass
++        
++        return sql, params

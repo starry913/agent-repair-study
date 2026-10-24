@@ -1,0 +1,252 @@
+diff --git a/CHANGES b/CHANGES
+index 7028c9e68..d6b4135b9 100644
+--- a/CHANGES
++++ b/CHANGES
+@@ -10,6 +10,8 @@ Incompatible changes
+ Deprecated
+ ----------
+
++* ``sphinx.util.docstrings.extract_metadata()``
++
+ Features added
+ --------------
+
+@@ -22,6 +24,9 @@ Features added
+ Bugs fixed
+ ----------
+
++* #8597: autodoc: a docsting having metadata only should be treated as
++  undocumented
++
+ Testing
+ --------
+
+diff --git a/doc/extdev/deprecated.rst b/doc/extdev/deprecated.rst
+index 9e17b9fb4..514a80541 100644
+--- a/doc/extdev/deprecated.rst
++++ b/doc/extdev/deprecated.rst
+@@ -22,6 +22,11 @@ The following is a list of deprecated interfaces.
+      - (will be) Removed
+      - Alternatives
+
++   * - ``sphinx.util.docstrings.extract_metadata()``
++     - 4.1
++     - 6.0
++     - ``sphinx.util.docstrings.separate_metadata()``
++
+    * - ``favicon`` variable in HTML templates
+      - 4.0
+      - TBD
+diff --git a/sphinx/ext/autodoc/__init__.py b/sphinx/ext/autodoc/__init__.py
+index c92709deb..962ba2ad0 100644
+--- a/sphinx/ext/autodoc/__init__.py
++++ b/sphinx/ext/autodoc/__init__.py
+@@ -30,7 +30,7 @@ from sphinx.ext.autodoc.mock import ismock, mock, undecorate
+ from sphinx.locale import _, __
+ from sphinx.pycode import ModuleAnalyzer, PycodeError
+ from sphinx.util import inspect, logging
+-from sphinx.util.docstrings import extract_metadata, prepare_docstring
++from sphinx.util.docstrings import prepare_docstring, separate_metadata
+ from sphinx.util.inspect import (evaluate_signature, getdoc, object_description, safe_getattr,
+                                  stringify_signature)
+ from sphinx.util.typing import OptionSpec, get_type_hints, restify
+@@ -722,9 +722,9 @@ class Documenter:
+                 # hack for ClassDocumenter to inject docstring via ObjectMember
+                 doc = obj.docstring
+
++            doc, metadata = separate_metadata(doc)
+             has_doc = bool(doc)
+
+-            metadata = extract_metadata(doc)
+             if 'private' in metadata:
+                 # consider a member private if docstring has "private" metadata
+                 isprivate = True
+@@ -1918,7 +1918,7 @@ class DataDocumenter(GenericAliasMixin, NewTypeMixin, TypeVarMixin,
+             return True
+         else:
+             doc = self.get_doc()
+-            metadata = extract_metadata('\n'.join(sum(doc, [])))
++            docstring, metadata = separate_metadata('\n'.join(sum(doc, [])))
+             if 'hide-value' in metadata:
+                 return True
+
+@@ -2456,7 +2456,7 @@ class AttributeDocumenter(GenericAliasMixin, NewTypeMixin, SlotsMixin,  # type:
+         else:
+             doc = self.get_doc()
+             if doc:
+-                metadata = extract_metadata('\n'.join(sum(doc, [])))
++                docstring, metadata = separate_metadata('\n'.join(sum(doc, [])))
+                 if 'hide-value' in metadata:
+                     return True
+
+diff --git a/sphinx/util/docstrings.py b/sphinx/util/docstrings.py
+index 46bb5b9b8..d81d7dd99 100644
+--- a/sphinx/util/docstrings.py
++++ b/sphinx/util/docstrings.py
+@@ -11,26 +11,28 @@
+ import re
+ import sys
+ import warnings
+-from typing import Dict, List
++from typing import Dict, List, Tuple
+
+ from docutils.parsers.rst.states import Body
+
+-from sphinx.deprecation import RemovedInSphinx50Warning
++from sphinx.deprecation import RemovedInSphinx50Warning, RemovedInSphinx60Warning
+
+ field_list_item_re = re.compile(Body.patterns['field_marker'])
+
+
+-def extract_metadata(s: str) -> Dict[str, str]:
+-    """Extract metadata from docstring."""
++def separate_metadata(s: str) -> Tuple[str, Dict[str, str]]:
++    """Separate docstring into metadata and others."""
+     in_other_element = False
+     metadata: Dict[str, str] = {}
++    lines = []
+
+     if not s:
+-        return metadata
++        return s, metadata
+
+     for line in prepare_docstring(s):
+         if line.strip() == '':
+             in_other_element = False
++            lines.append(line)
+         else:
+             matched = field_list_item_re.match(line)
+             if matched and not in_other_element:
+@@ -38,9 +40,20 @@ def extract_metadata(s: str) -> Dict[str, str]:
+                 if field_name.startswith('meta '):
+                     name = field_name[5:].strip()
+                     metadata[name] = line[matched.end():].strip()
++                else:
++                    lines.append(line)
+             else:
+                 in_other_element = True
++                lines.append(line)
++
++    return '\n'.join(lines), metadata
++
++
++def extract_metadata(s: str) -> Dict[str, str]:
++    warnings.warn("extract_metadata() is deprecated.",
++                  RemovedInSphinx60Warning, stacklevel=2)
+
++    docstring, metadata = separate_metadata(s)
+     return metadata
+
+
+diff --git a/tests/roots/test-ext-autodoc/target/metadata.py b/tests/roots/test-ext-autodoc/target/metadata.py
+new file mode 100644
+index 000000000..7a4488f67
+--- /dev/null
++++ b/tests/roots/test-ext-autodoc/target/metadata.py
+@@ -0,0 +1,2 @@
++def foo():
++    """:meta metadata-only-docstring:"""
+diff --git a/tests/test_ext_autodoc.py b/tests/test_ext_autodoc.py
+index 2becf5de2..fcaafa2af 100644
+--- a/tests/test_ext_autodoc.py
++++ b/tests/test_ext_autodoc.py
+@@ -735,6 +735,34 @@ def test_autodoc_undoc_members(app):
+     ]
+
+
++@pytest.mark.sphinx('html', testroot='ext-autodoc')
++def test_autodoc_undoc_members_for_metadata_only(app):
++    # metadata only member is not displayed
++    options = {"members": None}
++    actual = do_autodoc(app, 'module', 'target.metadata', options)
++    assert list(actual) == [
++        '',
++        '.. py:module:: target.metadata',
++        '',
++    ]
++
++    # metadata only member is displayed when undoc-member given
++    options = {"members": None,
++               "undoc-members": None}
++    actual = do_autodoc(app, 'module', 'target.metadata', options)
++    assert list(actual) == [
++        '',
++        '.. py:module:: target.metadata',
++        '',
++        '',
++        '.. py:function:: foo()',
++        '   :module: target.metadata',
++        '',
++        '   :meta metadata-only-docstring:',
++        '',
++    ]
++
++
+ @pytest.mark.sphinx('html', testroot='ext-autodoc')
+ def test_autodoc_inherited_members(app):
+     options = {"members": None,
+diff --git a/tests/test_util_docstrings.py b/tests/test_util_docstrings.py
+index 543feca2a..2d406b81c 100644
+--- a/tests/test_util_docstrings.py
++++ b/tests/test_util_docstrings.py
+@@ -8,31 +8,48 @@
+     :license: BSD, see LICENSE for details.
+ """
+
+-from sphinx.util.docstrings import extract_metadata, prepare_commentdoc, prepare_docstring
++from sphinx.util.docstrings import prepare_commentdoc, prepare_docstring, separate_metadata
+
+
+-def test_extract_metadata():
+-    metadata = extract_metadata(":meta foo: bar\n"
+-                                ":meta baz:\n")
++def test_separate_metadata():
++    # metadata only
++    text = (":meta foo: bar\n"
++            ":meta baz:\n")
++    docstring, metadata = separate_metadata(text)
++    assert docstring == ''
+     assert metadata == {'foo': 'bar', 'baz': ''}
+
++    # non metadata field list item
++    text = (":meta foo: bar\n"
++            ":param baz:\n")
++    docstring, metadata = separate_metadata(text)
++    assert docstring == ':param baz:\n'
++    assert metadata == {'foo': 'bar'}
++
+     # field_list like text following just after paragaph is not a field_list
+-    metadata = extract_metadata("blah blah blah\n"
+-                                ":meta foo: bar\n"
+-                                ":meta baz:\n")
++    text = ("blah blah blah\n"
++            ":meta foo: bar\n"
++            ":meta baz:\n")
++    docstring, metadata = separate_metadata(text)
++    assert docstring == text
+     assert metadata == {}
+
+     # field_list like text following after blank line is a field_list
+-    metadata = extract_metadata("blah blah blah\n"
+-                                "\n"
+-                                ":meta foo: bar\n"
+-                                ":meta baz:\n")
++    text = ("blah blah blah\n"
++            "\n"
++            ":meta foo: bar\n"
++            ":meta baz:\n")
++    docstring, metadata = separate_metadata(text)
++    assert docstring == "blah blah blah\n\n"
+     assert metadata == {'foo': 'bar', 'baz': ''}
+
+     # non field_list item breaks field_list
+-    metadata = extract_metadata(":meta foo: bar\n"
+-                                "blah blah blah\n"
+-                                ":meta baz:\n")
++    text = (":meta foo: bar\n"
++            "blah blah blah\n"
++            ":meta baz:\n")
++    docstring, metadata = separate_metadata(text)
++    assert docstring == ("blah blah blah\n"
++                         ":meta baz:\n")
+     assert metadata == {'foo': 'bar'}

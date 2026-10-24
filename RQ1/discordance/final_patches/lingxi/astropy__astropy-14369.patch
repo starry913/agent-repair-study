@@ -1,0 +1,93 @@
+diff --git a/astropy/units/format/cds.py b/astropy/units/format/cds.py
+index 307e987ed6..536de755fa 100644
+--- a/astropy/units/format/cds.py
++++ b/astropy/units/format/cds.py
+@@ -187,7 +187,87 @@ class CDS(Base):
+             if len(p) == 3:
+                 p[0] = p[2] ** -1
+             else:
+-                p[0] = p[1] / p[3]
++                # ORIGINAL ISSUE: The current left-associative division causes problems
++                # with consecutive divisions like A/B/C/D being parsed as (((A/B)/C)/D)
++                # instead of A/(B*C*D).
++                # 
++                # NEW APPROACH: When dividing by a composite unit that itself contains
++                # divisions, we need to "flatten" the result to ensure proper power assignment.
++                from astropy.units.core import CompositeUnit, Unit, UnitBase
++                
++                result = p[1] / p[3]
++                
++                # Check if we have a consecutive division pattern that needs flattening
++                # This happens when the result has units in the numerator that should be 
++                # in the denominator due to consecutive division operations.
++                if isinstance(result, CompositeUnit) and len(result.bases) > 1:
++                    # We need to analyze if this looks like a consecutive division case
++                    # by checking if we have mixed positive and negative powers
++                    # where positive powers (other than the first) might be misplaced.
++                    
++                    positive_powers = [(base, power) for base, power in zip(result.bases, result.powers) if power > 0]
++                    negative_powers = [(base, power) for base, power in zip(result.bases, result.powers) if power < 0]
++                    
++                    # If we have multiple positive powers, this might be a consecutive division issue.
++                    # In the expression A/B/C/D, only A should have positive power, while B, C, D should be negative.
++                    # But the current parsing might put some of B, C, D in the numerator.
++                    if len(positive_powers) > 1:
++                        # This is a heuristic: in most physical unit expressions like J/m/s/kpc2,
++                        # we expect only one unit with positive power (the "main" unit).
++                        # If we see multiple positive powers, it's likely due to consecutive division parsing issues.
++                        # 
++                        # However, this heuristic might be too broad, so let's be more specific:
++                        # We'll only apply this if the right side (p[3]) was itself a composite unit,
++                        # indicating nested divisions.
++                        
++                        if isinstance(p[3], CompositeUnit):
++                            # This suggests we're dealing with nested divisions.
++                            # Apply the flattening by ensuring only the leftmost unit stays positive.
++                            bases = []
++                            powers = []
++                            scale = result.scale
++                            
++                            # BETTER APPROACH: Instead of using the "first positive" heuristic,
++                            # let's use the structure of the parsing to determine the correct unit order.
++                            # 
++                            # In a consecutive division A/B/C, the parsing happens as:
++                            # 1. Parse A/B → result has A(+1), B(-1)
++                            # 2. Parse (A/B)/C → result should be A(+1), B(-1), C(-1)
++                            #
++                            # The issue is that p[1] is the left operand (numerator) and p[3] is right operand.
++                            # We should preserve the sign of units from p[1] and negate units from p[3].
++                            
++                            # Get the units that came from the numerator (p[1])
++                            numerator_units = set()
++                            if isinstance(p[1], CompositeUnit):
++                                numerator_units.update(p[1].bases)
++                            elif hasattr(p[1], '_represents') and p[1]._represents is not None:
++                                # Handle named units that might have a composite representation
++                                numerator_units.add(p[1])
++                            else:
++                                numerator_units.add(p[1])
++                            
++                            # Reconstruct with correct signs
++                            for base, power in zip(result.bases, result.powers):
++                                bases.append(base)
++                                if base in numerator_units:
++                                    # This unit came from the numerator, keep its sign
++                                    powers.append(power)
++                                else:
++                                    # This unit came from the denominator, should be negative
++                                    if power > 0:
++                                        powers.append(-power)
++                                    else:
++                                        powers.append(power)
++                            
++                            if len(bases) == 1:
++                                result = bases[0] ** powers[0]
++                                if scale != 1.0:
++                                    result = Unit(scale) * result
++                            else:
++                                result = CompositeUnit(scale, bases, powers)
++                
++                p[0] = result
+ 
+         def p_unit_expression(p):
+             """

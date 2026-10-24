@@ -1,0 +1,236 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 9735ce10c8..35c6c9351d 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -441,17 +441,40 @@ class Query(BaseExpression):
+         """
+         if not self.annotation_select:
+             return {}
+-        existing_annotations = [
+-            annotation
+-            for alias, annotation in self.annotations.items()
+-            if alias not in added_aggregate_names
+-        ]
++        # Only include annotations that are actually used in the query
++        # Apply this optimization only for count() queries (indicated by "__count" aggregate)
++        if added_aggregate_names == ["__count"]:
++            all_annotation_aliases = set(self.annotations.keys()) - set(added_aggregate_names)
++            used_annotation_aliases = self._get_used_annotations(all_annotation_aliases, added_aggregate_names)
++            
++            # Be conservative: only optimize away simple annotations to avoid complex edge cases
++            safe_to_remove_aliases = set()
++            for alias in all_annotation_aliases - used_annotation_aliases:
++                annotation = self.annotations[alias]
++                # Only remove annotations that are safe to remove (simple expressions)
++                # Avoid removing complex annotations like subqueries, window functions, etc.
++                if self._is_safe_to_remove_annotation(annotation):
++                    safe_to_remove_aliases.add(alias)
++            
++            optimized_annotation_aliases = all_annotation_aliases - safe_to_remove_aliases
++            existing_annotations = [
++                annotation
++                for alias, annotation in self.annotations.items()
++                if alias not in added_aggregate_names and alias in optimized_annotation_aliases
++            ]
++        else:
++            # For explicit aggregate() calls, use the original logic to preserve existing behavior
++            existing_annotations = [
++                annotation
++                for alias, annotation in self.annotations.items()
++                if alias not in added_aggregate_names
++            ]
+         # Decide if we need to use a subquery.
+         #
+         # Existing annotations would cause incorrect results as get_aggregation()
+-        # must produce just one result and thus must not use GROUP BY. But we
+-        # aren't smart enough to remove the existing annotations from the
+-        # query, so those would force us to use GROUP BY.
++        # must produce just one result and thus must not use GROUP BY. We now
++        # analyze which annotations are actually used and only include those,
++        # so unused annotations don't force us to use GROUP BY.
+         #
+         # If the query has limit or distinct, or uses set operations, then
+         # those operations must be done in a subquery so that the query
+@@ -525,6 +548,24 @@ class Query(BaseExpression):
+             self.select = ()
+             self.default_cols = False
+             self.extra = {}
++            
++            # Filter out unused annotations from annotation_select to optimize count queries
++            # Only apply this optimization for count() queries
++            if added_aggregate_names == ["__count"]:
++                all_annotation_aliases = set(self.annotations.keys()) - set(added_aggregate_names)
++                used_annotation_aliases = self._get_used_annotations(all_annotation_aliases, added_aggregate_names)
++                
++                # Be conservative: only optimize away simple annotations to avoid complex edge cases
++                safe_to_remove_aliases = set()
++                for alias in all_annotation_aliases - used_annotation_aliases:
++                    annotation = self.annotations[alias]
++                    if self._is_safe_to_remove_annotation(annotation):
++                        safe_to_remove_aliases.add(alias)
++                
++                optimized_annotation_aliases = all_annotation_aliases - safe_to_remove_aliases
++                used_annotations = optimized_annotation_aliases | set(added_aggregate_names)
++                if used_annotations != set(self.annotations.keys()):
++                    self.set_annotation_mask(used_annotations)
+ 
+         empty_set_result = [
+             expression.empty_result_set_value
+@@ -553,6 +594,158 @@ class Query(BaseExpression):
+         obj.add_annotation(Count("*"), alias="__count", is_summary=True)
+         return obj.get_aggregation(using, ["__count"])["__count"]
+ 
++    def _get_used_annotations(self, annotation_aliases, added_aggregate_names=None):
++        """
++        Analyze query to find which annotation aliases are actually used in:
++        - WHERE clauses (filters)
++        - ORDER BY clauses
++        - Other annotations (dependencies)
++        - Added aggregates (new aggregate functions that reference annotations)
++        Returns set of used annotation aliases.
++        """
++        if not annotation_aliases:
++            return set()
++        
++        used = set()
++        
++        # Check WHERE clause for annotation references
++        if self.where:
++            used.update(self._find_annotations_in_expressions([self.where], annotation_aliases))
++        
++        # Check ORDER BY clause for annotation references
++        if self.order_by:
++            used.update(self._find_annotations_in_order_by(annotation_aliases))
++        
++        # Check annotation dependencies (annotations that reference other annotations)
++        used.update(self._find_annotation_dependencies(annotation_aliases))
++        
++        # Check if any added aggregates reference existing annotations
++        if added_aggregate_names:
++            for aggregate_name in added_aggregate_names:
++                if aggregate_name in self.annotations:
++                    aggregate_expr = self.annotations[aggregate_name]
++                    used.update(self._find_annotations_in_expressions([aggregate_expr], annotation_aliases))
++        
++        return used
++
++    def _find_annotations_in_expressions(self, expressions, annotation_aliases):
++        """
++        Recursively traverse expressions to find references to annotation aliases.
++        Returns set of referenced annotation aliases.
++        """
++        found = set()
++        
++        for expr in expressions:
++            if expr is None:
++                continue
++                
++            # Handle F expressions - check if they reference annotations
++            if hasattr(expr, 'name') and hasattr(expr, '__class__'):
++                if expr.__class__.__name__ == 'F' and expr.name in annotation_aliases:
++                    found.add(expr.name)
++            
++            # Handle Col expressions - check if they reference annotations  
++            if hasattr(expr, 'target') and hasattr(expr, 'alias'):
++                # Col expressions pointing to annotation aliases
++                if hasattr(expr.target, 'attname') and expr.target.attname in annotation_aliases:
++                    found.add(expr.target.attname)
++            
++            # Handle Ref expressions - direct annotation references
++            if hasattr(expr, 'refs') and expr.refs in annotation_aliases:
++                found.add(expr.refs)
++            
++            # Recursively check source expressions
++            if hasattr(expr, 'get_source_expressions'):
++                try:
++                    source_exprs = expr.get_source_expressions()
++                    if source_exprs:
++                        found.update(self._find_annotations_in_expressions(source_exprs, annotation_aliases))
++                except (AttributeError, TypeError):
++                    pass
++            
++            # Handle containers like lists, tuples (e.g., for WhereNode.children)
++            if hasattr(expr, 'children'):
++                try:
++                    found.update(self._find_annotations_in_expressions(expr.children, annotation_aliases))
++                except (AttributeError, TypeError):
++                    pass
++            elif hasattr(expr, '__iter__') and not isinstance(expr, (str, bytes)):
++                try:
++                    found.update(self._find_annotations_in_expressions(list(expr), annotation_aliases))
++                except (AttributeError, TypeError):
++                    pass
++        
++        return found
++
++    def _find_annotations_in_order_by(self, annotation_aliases):
++        """
++        Check ORDER BY clause for annotation references.
++        Returns set of referenced annotation aliases.
++        """
++        found = set()
++        
++        for order_expr in self.order_by:
++            if isinstance(order_expr, str):
++                # Handle string ordering like 'field_name' or '-field_name'
++                field_name = order_expr.lstrip('-')
++                if field_name in annotation_aliases:
++                    found.add(field_name)
++            else:
++                # Handle expression-based ordering
++                found.update(self._find_annotations_in_expressions([order_expr], annotation_aliases))
++        
++        return found
++
++    def _find_annotation_dependencies(self, annotation_aliases):
++        """
++        Find annotations that are referenced by other annotations.
++        Returns set of annotation aliases that are dependencies of other annotations.
++        """
++        found = set()
++        
++        # Check each annotation's expression for references to other annotations
++        for alias, annotation in self.annotations.items():
++            if alias in annotation_aliases:
++                # Skip checking the annotation against itself
++                other_aliases = annotation_aliases - {alias}
++                if other_aliases:
++                    found.update(self._find_annotations_in_expressions([annotation], other_aliases))
++        
++        return found
++
++    def _is_safe_to_remove_annotation(self, annotation):
++        """
++        Determine if an annotation is safe to remove during count() optimization.
++        Only remove simple annotations that don't affect query structure in complex ways.
++        """
++        # Get the class name to check annotation type
++        annotation_type = type(annotation).__name__
++        
++        # Safe to remove: simple expressions that don't affect GROUP BY or query structure
++        safe_types = {
++            'Value',      # Constant values
++            'F',          # Simple field references (if not used)  
++            'Case',       # Simple conditional expressions
++            'Coalesce',   # Simple coalesce expressions
++        }
++        
++        # NOT safe to remove: complex expressions that might affect query structure
++        unsafe_types = {
++            'Subquery',           # Subquery annotations affect GROUP BY
++            'Exists',             # Existence checks
++            'Count',              # Aggregate functions require JOINs
++            'Sum', 'Avg', 'Max', 'Min',  # Other aggregate functions
++            'Window',             # Window functions
++        }
++        
++        if annotation_type in unsafe_types:
++            return False
++        elif annotation_type in safe_types:
++            return True
++        else:
++            # For unknown types, be conservative and don't remove them
++            return False
++
+     def has_filters(self):
+         return self.where

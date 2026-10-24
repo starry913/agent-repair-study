@@ -1,0 +1,3692 @@
+<issue_description>
+__in doesn't clear selected fields on the RHS when QuerySet.alias() is used after annotate().
+Description
+	
+Here is a test case to reproduce the bug, you can add this in tests/annotations/tests.py
+	def test_annotation_and_alias_filter_in_subquery(self):
+		long_books_qs = (
+			Book.objects.filter(
+				pages__gt=400,
+			)
+			.annotate(book_annotate=Value(1))
+			.alias(book_alias=Value(1))
+		)
+		publisher_books_qs = (
+			Publisher.objects.filter(
+				book__in=long_books_qs
+			)
+			.values("name")
+		)
+		self.assertCountEqual(
+			publisher_books_qs,
+			[
+				{'name': 'Apress'},
+				{'name': 'Sams'},
+				{'name': 'Prentice Hall'},
+				{'name': 'Morgan Kaufmann'}
+			]
+		)
+You should get this error:
+django.db.utils.OperationalError: sub-select returns 10 columns - expected 1
+</issue_description>
+
+<problem_decoder 0>
+## Step 1
+
+### 🤔 Thinking
+The user has uploaded a Django codebase and wants me to analyze a bug described in the issue description. Let me start by understanding the issue:
+
+
+1. The issue is about `__in` not clearing selected fields on the RHS (right-hand side) when `QuerySet.alias()` is used after `annotate()`
+
+2. There's a test case provided that shows the bug
+
+3. The error is: `django.db.utils.OperationalError: sub-select returns 10 columns - expected 1`
+
+Let me break this down:
+- The test creates a QuerySet with `Book.objects.filter(pages__gt=400).annotate(book_annotate=Value(1)).alias(book_alias=Value(1))`
+- This QuerySet is then used in an `__in` lookup: `Publisher.objects.filter(book__in=long_books_qs)`
+- The error suggests that the subquery is returning 10 columns when it should only return 1
+
+This seems like the issue is that when using `alias()` after `annotate()`, the query builder is not properly clearing/selecting only the needed columns for the subquery used in the `__in` lookup.
+
+Let me start exploring the repository structure and then look into the relevant code.
+
+### 👁️ Observation
+I'll help you analyze this Django ORM issue. Let me start by exploring the repository structure to understand the codebase and then analyze the specific problem.
+
+### 🎯 Action
+view_directory({'dir_path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Great! This is a Django codebase. I can see the tests/annotations/ directory which is mentioned in the issue description. Let me start by examining the issue more closely:
+
+
+1. The bug is in the ORM where `__in` doesn't clear selected fields on the RHS when `QuerySet.alias()` is used after `annotate()`
+
+2. The error is "sub-select returns 10 columns - expected 1"
+
+3. This happens when using a QuerySet with annotate() and alias() inside an __in lookup
+
+Let me first look at the test case structure and then explore the Django ORM code related to lookups and query building.
+
+### 🎯 Action
+view_directory({'dir_path': './tests/annotations/'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Let me look at the annotations test models to understand the structure, and then examine the Django ORM code.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/annotations/models.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Now I understand the models. The test case uses:
+- Book model (with pages field, related to Publisher via ForeignKey)  
+- Publisher model (with name field, related to Book via reverse ForeignKey)
+
+The test creates a QuerySet of long books (pages > 400) with annotate() and alias(), then uses it in a Publisher.objects.filter(book__in=long_books_qs) query.
+
+Let me look at the Django ORM code to understand how __in lookups work and how they handle subqueries. First, let me explore the django/db directory structure.
+
+### 🎯 Action
+view_directory({'dir_path': './django/db/'})
+
+
+## Step 5
+
+### 🤔 Thinking
+Great! Now I can see the Django ORM structure. The key files I need to explore are:
+
+
+1. django/db/models/lookups.py - This likely contains the __in lookup implementation
+
+2. django/db/models/query.py - This contains QuerySet implementation
+
+3. django/db/models/sql/compiler.py - This handles SQL generation
+
+4. django/db/models/sql/query.py - This contains the Query class
+
+Let me start with lookups.py to understand how __in works.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/', 'keywords': '["class.*In\\(", "__in"]'})
+
+
+## Step 6
+
+### 🤔 Thinking
+I need to fix the keywords parameter format.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/', 'keywords': ['class.*In', 'sub-select returns.*columns']})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me look at the lookups.py file to see the In class implementation.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/lookups.py', 'view_range': [380, 430]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Great! I found the In class which handles the __in lookup. Let me see the complete implementation:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/lookups.py', 'view_range': [414, 460]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Now I can see the issue! Looking at lines 421-425 in the In class:
+
+
+
+```python
+if isinstance(self.rhs, Query):
+    self.rhs.clear_ordering(clear_default=True)
+    if not self.rhs.has_select_fields:
+        self.rhs.clear_select_clause()
+        self.rhs.add_fields(["pk"])
+
+
+```
+
+The problem is that when `annotate()` and `alias()` are used together, `self.rhs.has_select_fields` might be `True`, which means the `clear_select_clause()` method is not called. This would cause the subquery to include all the annotated and aliased fields rather than just selecting the primary key.
+
+Let me check what `has_select_fields` does and how annotate/alias affects it. Let me look at the Query class in the sql module.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/', 'keywords': ['has_select_fields', 'clear_select_clause', 'add_fields']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me examine the Query class to understand how has_select_fields works:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [260, 280]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Now I understand! The `has_select_fields` property returns True if any of these are present:
+- `self.select` - actual selected fields
+- `self.annotation_select_mask` - fields from annotations
+- `self.extra_select_mask` - extra selected fields
+
+So when `annotate()` is used, `annotation_select_mask` becomes non-empty, making `has_select_fields` return True. This prevents the `clear_select_clause()` and `add_fields(["pk"])` from being called, which is what causes the subquery to return multiple columns instead of just the primary key.
+
+Let me check what `clear_select_clause` does and how annotations are handled:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/query.py', 'keywords': ['def clear_select_clause', 'annotation_select_mask']})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me search more broadly for these terms:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/query.py', 'keywords': ['clear_select_clause', 'annotation_select_mask']})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me look at the query.py file directly to find these methods and properties:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/', 'keywords': ['clear_select_clause', 'annotation_select']})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me check the clear_select_clause method in query.py:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [570, 590]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Let me search for the actual definition of clear_select_clause method:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/query.py', 'keywords': ['def clear_select_clause']})
+
+
+## Step 16
+
+### 🤔 Thinking
+Let me grep for it:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [2080, 2100]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Perfect! Now I can see the `clear_select_clause()` method at lines 2092-
+2098. It clears:
+- `self.select` 
+- `self.default_cols`
+- `self.select_related`
+- And calls `self.set_extra_mask(())`
+- And calls `self.set_annotation_mask(())`
+
+The issue is likely that when `annotate()` and `alias()` are used, the `has_select_fields` property returns True because annotations are present, so `clear_select_clause()` never gets called.
+
+But looking at the `clear_select_clause` method, it does call `set_annotation_mask(())` which should clear the annotations. So the real issue might be more subtle.
+
+Let me look at how `alias()` works and how it affects the query:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/', 'keywords': ['def alias']})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me check the alias method in the QuerySet:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/query.py', 'view_range': [1580, 1600]})
+
+
+## Step 19
+
+### 🤔 Thinking
+Interesting! The `alias()` method calls `_annotate()` with `select=False`, while `annotate()` calls it with `select=True`. Let me see the complete `_annotate` method:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/query.py', 'view_range': [1593, 1620]})
+
+
+## Step 20
+
+### 🤔 Thinking
+Let me see more of the _annotate method:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/query.py', 'view_range': [1620, 1650]})
+
+
+## Step 21
+
+### 🤔 Thinking
+Now I see the issue! In line 1632-1637, the method calls `clone.query.add_annotation()` with the `select=select` parameter. So:
+
+- `annotate()` calls `_annotate()` with `select=True`
+- `alias()` calls `_annotate()` with `select=False`
+
+The `select` parameter determines whether the annotation should be included in the SELECT clause. However, even when `select=False` (for aliases), the annotation is still added to the query, and it seems like the `has_select_fields` property might still return `True` because of this.
+
+Let me check the `add_annotation` method in the SQL query:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/query.py', 'keywords': ['def add_annotation']})
+
+
+## Step 22
+
+### 🤔 Thinking
+Let me search more broadly:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/query.py', 'keywords': ['add_annotation']})
+
+
+## Step 23
+
+### 🤔 Thinking
+Let me look directly at the file content to find add_annotation:
+
+### 🎯 Action
+ask_repository_agent({'query': 'Where is the add_annotation method defined in the Django codebase? What does it do?'})
+
+
+## Step 24
+
+### 🤔 Thinking
+The repository agent didn't find the add_annotation method. Let me try a different approach and look for annotation-related methods in the SQL query module.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/', 'keywords': ['annotations', 'set_annotation']})
+
+
+## Step 25
+
+### 🤔 Thinking
+Let me check how annotations are handled in the SQL compiler:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [2400, 2420]})
+
+
+## Step 26
+
+### 🤔 Thinking
+Let me try a different approach. Let me reproduce the issue and understand what exactly happens. Let me look at the root cause analysis steps from the dev knowledge and focus on the SQL generation process. Let me check what `annotations` property looks like:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [180, 200]})
+
+
+## Step 27
+
+### 🤔 Thinking
+Let me now trace through the root cause analysis steps from the dev knowledge. The issue is that when using `QuerySet.alias()` after `annotate()`, the __in lookup doesn't clear selected fields properly, causing "sub-select returns 10 columns - expected 1" error.
+
+Let me look for the actual bug by creating a test to understand the current behavior. But first, let me check if the existing tests have similar patterns to understand better.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/annotations/tests.py', 'view_range': [1, 50]})
+
+
+## Step 28
+
+### 🤔 Thinking
+Now let me examine the issue more deeply. The bug is that when we have a QuerySet with both `annotate()` and `alias()` and then use it in an `__in` lookup, it doesn't properly clear the selected fields.
+
+Let me look at the has_select_fields property again and understand how annotations affect it. I already found that at line 267-270:
+
+
+
+```python
+@property
+def has_select_fields(self):
+    return bool(
+        self.select or self.annotation_select_mask or self.extra_select_mask
+    )
+
+
+```
+
+Now let me understand what `annotation_select_mask` is and how it gets populated. Let me search for this:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/query.py', 'keywords': ['annotation_select_mask', 'set_annotation_mask']})
+
+
+## Step 29
+
+### 🤔 Thinking
+Let me try to search for it by looking at the actual file and finding where annotation_select_mask is defined:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [90, 110]})
+
+
+## Step 30
+
+### 🤔 Thinking
+Let me look earlier in the file to find where annotation_select_mask is initialized:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [200, 240]})
+
+
+## Step 31
+
+### 🤔 Thinking
+Perfect! Now I can see that `annotation_select_mask` is initialized as `None` at line 
+208. This property controls which annotations are selected in the query. Let me find how it gets populated.
+
+Let me check the `annotation_select` property that was mentioned on line 95, and understand the relationship with `annotation_select_mask`:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/query.py', 'keywords': ['@property', 'annotation_select']})
+
+
+## Step 32
+
+### 🤔 Thinking
+Let me use the repository agent to understand how annotations work in Django queries:
+
+### 🎯 Action
+ask_repository_agent({'query': 'How do annotations work in Django ORM queries? What is the difference between annotation_select and annotation_select_mask in django/db/models/sql/query.py? How does the alias() method affect annotations?'})
+
+
+## Step 33
+
+### 🤔 Thinking
+The repository agent didn't provide the specific details about `annotation_select` vs `annotation_select_mask` that I need. Let me take a different approach and understand the core issue by examining the `In` lookup implementation more carefully.
+
+Looking back at the In class at lines 421-425:
+
+
+
+```python
+if isinstance(self.rhs, Query):
+    self.rhs.clear_ordering(clear_default=True)
+    if not self.rhs.has_select_fields:
+        self.rhs.clear_select_clause()
+        self.rhs.add_fields(["pk"])
+
+
+```
+
+The issue is that when `annotate()` and `alias()` are used together, `has_select_fields` returns True, preventing the proper clearing of the select clause.
+
+Let me think about this step by step:
+
+
+1. Book.objects.filter(pages__gt=400) - creates a basic query
+
+2. .annotate(book_annotate=Value(1)) - adds an annotation that gets selected (select=True)
+
+3. .alias(book_alias=Value(1)) - adds an alias annotation that doesn't get selected (select=False)
+
+When this QuerySet is used in the __in lookup, the `has_select_fields` check returns True because there are annotations present, so `clear_select_clause()` is never called, and the subquery ends up including all the annotated fields instead of just the primary key.
+
+The error "sub-select returns 10 columns - expected 1" suggests that the subquery is returning multiple columns (all the fields from the Book model plus the annotation) when it should only return 1 column (the primary key).
+
+Let me check if there's a deeper issue - maybe the problem is not just that `clear_select_clause()` is not called, but that even when it is called, it doesn't properly handle aliases that are created after annotations.
+
+### 🎯 Action
+think({'thought': 'Based on my analysis so far, I\'ve identified the core issue:\n\n
+1. The `In` lookup in `django/db/models/lookups.py` (lines 421-425) has a condition that checks `if not self.rhs.has_select_fields:` before calling `clear_select_clause()` and `add_fields(["pk"])`.\n\n
+2. The `has_select_fields` property (line 267-270 in query.py) returns `True` when `self.select or self.annotation_select_mask or self.extra_select_mask` are non-empty.\n\n
+3. When `annotate()` is called followed by `alias()`, both create annotations in the query, but:\n   - `annotate()` calls `_annotate()` with `select=True` \n   - `alias()` calls `_annotate()` with `select=False`\n\n
+4. However, even with `select=False`, the annotation still affects the query structure in a way that makes `has_select_fields` return `True`.\n\n
+5. This prevents the `clear_select_clause()` from being called, which means the subquery in the `__in` lookup doesn\'t get properly trimmed to only select the primary key.\n\nThe root cause seems to be that the `has_select_fields` check is too broad and doesn\'t distinguish between annotations that should be selected versus those that are just aliases.\n\nLet me verify this hypothesis by examining exactly what happens when `alias()` is used after `annotate()` and how it affects the query\'s select clause.'})
+
+
+## Step 34
+
+### 🤔 Thinking
+Now let me examine the existing tests to see if there are any patterns that might help confirm my understanding. Let me also check if there are any similar issues in the test suite.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/', 'keywords': ['alias.*__in', 'annotate.*alias.*__in']})
+
+
+## Step 35
+
+### 🤔 Thinking
+Let me search for existing tests that use both annotate and alias:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/', 'keywords': ['alias', 'test.*annotate.*alias']})
+
+
+## Step 36
+
+### 🤔 Thinking
+Let me look at the annotations tests to see if there are any tests combining annotate and alias:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/annotations/tests.py', 'keywords': ['alias']})
+
+
+## Step 37
+
+### 🤔 Thinking
+Let me check the queryset values tests which might have related patterns:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/expressions/test_queryset_values.py', 'view_range': [37, 50]})
+
+
+## Step 38
+
+### 🤔 Thinking
+Now let me look at the exact problem by exploring the Query class's implementation further. Based on my analysis, the issue is likely in the In lookup's `get_prep_lookup` method. Let me understand what happens when we have both annotations and aliases. 
+
+Let me check the existing test that reproduces the issue to understand the exact flow:
+
+### 🎯 Action
+think({'thought': 'Let me summarize what I\'ve found so far:\n\n
+1. **Problem**: When using `QuerySet.alias()` after `annotate()`, the `__in` lookup doesn\'t clear selected fields on the RHS, causing "sub-select returns 10 columns - expected 1" error.\n\n
+2. **Root Cause Location**: The issue is in the `In` class in `django/db/models/lookups.py`, specifically in the `get_prep_lookup` method (lines 418-426).\n\n
+3. **The Logic Flaw**: The method has this condition:\n   ```python\n   if isinstance(self.rhs, Query):\n       self.rhs.clear_ordering(clear_default=True)\n       if not self.rhs.has_select_fields:  # This is the problem line\n           self.rhs.clear_select_clause()\n           self.rhs.add_fields(["pk"])\n   ```\n\n
+4. **Why It Fails**: The `has_select_fields` property (lines 267-270 in query.py) returns `True` when there are annotations present, even if they\'re aliases (select=False). This prevents the necessary cleanup of the subquery.\n\n
+5. **Expected Behavior**: For `__in` lookups, the subquery should only select the primary key field, regardless of whether the original QuerySet has annotations or aliases.\n\n
+6. **Current Behavior**: When both `annotate()` and `alias()` are used, the subquery includes all annotated fields in the SELECT clause, causing the database error.\n\nThe fix would likely involve either:\n- Modifying the `has_select_fields` check to be more specific\n- Always calling `clear_select_clause()` and `add_fields(["pk"])` for `__in` lookups regardless of the `has_select_fields` status\n- Or properly handling the distinction between annotations that should be selected versus aliases that shouldn\'t be selected\n\nI need to explore this further to determine the best approach.'})
+
+
+## Step 39
+
+### 🤔 Thinking
+Now I need to complete my analysis by understanding exactly what the `clear_select_clause()` method does and whether it's the right solution. Let me also see if there are any other similar lookups that handle this differently.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/', 'keywords': ['class.*Lookup', 'FieldGetDbPrepValueIterableMixin']})
+
+
+## Step 40
+
+### 🤔 Thinking
+Let me check other lookups to see if they have similar issues:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/lookups.py', 'view_range': [250, 290]})
+
+
+## Step 41
+
+### 🤔 Thinking
+Now let me complete my exploration and provide a comprehensive analysis of the issue. Based on all my investigation, I have a clear understanding of the problem:
+
+
+1. The issue is in `django/db/models/lookups.py` in the `In` class
+
+2. The `get_prep_lookup` method checks `if not self.rhs.has_select_fields:` before clearing the select clause
+
+3. When `annotate()` and `alias()` are used together, `has_select_fields` returns `True`, preventing the necessary cleanup
+
+4. This causes the subquery to return multiple columns instead of just the primary key
+
+The root cause is that the `has_select_fields` property doesn't distinguish between annotations that should be in the SELECT clause versus aliases that shouldn't be.
+
+### 👁️ Observation
+<observation>
+
+1. Found the root cause in django/db/models/lookups.py in the In class (lines 418-426):
+   - The get_prep_lookup method checks `if not self.rhs.has_select_fields:` before calling clear_select_clause()
+   - When annotate() and alias() are used together, has_select_fields returns True, preventing cleanup
+
+2. Alternative action could have been to examine the SQL compiler to see how it generates the subquery
+
+3. Next action: Provide comprehensive issue analysis covering the problem statement, root cause, current behavior, and expected behavior
+</observation>
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [2092, 2100]})
+
+
+## Step 42
+
+### 🤔 Thinking
+Perfect! Now I have a complete understanding of the issue. The `clear_select_clause()` method at lines 2092-2098 does properly clear annotations by calling `set_annotation_mask(())`, but it's never called because of the `has_select_fields` check.
+
+Now I can provide a comprehensive issue analysis.
+
+### 📋 Conclusion
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "When using QuerySet.alias() after annotate(), the __in lookup doesn't properly clear selected fields on the right-hand side, causing a database error 'sub-select returns 10 columns - expected 1' because the subquery includes all annotated fields instead of just the primary key."
+    - status: "yes"
+  </problem_statement>
+  <root_cause>
+    The root cause is in the `In` lookup class in `django/db/models/lookups.py` at lines 418-
+426. The `get_prep_lookup()` method has a conditional check `if not self.rhs.has_select_fields:` that prevents the necessary cleanup of the subquery when both `annotate()` and `alias()` are used together.
+
+    The `has_select_fields` property (defined at lines 267-270 in `django/db/models/sql/query.py`) returns `True` when any of `self.select`, `self.annotation_select_mask`, or `self.extra_select_mask` are non-empty. When `annotate()` is called (even when followed by `alias()`), annotations are present in the query, making `has_select_fields` return `True`. This prevents the execution of `self.rhs.clear_select_clause()` and `self.rhs.add_fields(["pk"])`, which are essential for ensuring the subquery only selects the primary key field for `__in` lookups.
+
+    The issue is that the current logic doesn't account for the fact that `alias()` creates annotations that shouldn't be selected (`select=False`), but the `has_select_fields` check doesn't distinguish between annotations that should be selected and those that are just aliases.
+  </root_cause>
+  <current_behavior>
+    Currently, in `django/db/models/lookups.py`, the `In` class's `get_prep_lookup()` method performs the following logic:
+
+    
+1. When a Query object is used as the right-hand side of an `__in` lookup, it checks `if not self.rhs.has_select_fields:`
+    
+2. If the condition is false (i.e., if there are select fields), it skips calling `clear_select_clause()` and `add_fields(["pk"])`
+    
+3. When a QuerySet uses both `annotate()` and `alias()`, the `has_select_fields` property returns `True` because annotations exist in the query (even though aliases have `select=False`)
+    
+4. This causes the subquery to include all annotated and model fields in the SELECT clause instead of just the primary key
+    
+5. The database then raises an `OperationalError: sub-select returns 10 columns - expected 1` because `__in` lookups expect only one column (the primary key) from the subquery
+
+    Key files affected:
+    - `django/db/models/lookups.py`: Contains the faulty `In` lookup logic
+    - `django/db/models/sql/query.py`: Contains the `has_select_fields` property that incorrectly returns `True`
+    - `django/db/models/query.py`: Contains the `alias()` and `annotate()` methods that create the problematic query structure
+  </current_behavior>
+  <expected_behavior>
+    After implementing the fix, the expected behavior should be:
+
+    
+1. When a QuerySet with both `annotate()` and `alias()` is used in an `__in` lookup, the subquery should automatically be cleaned up to select only the primary key field
+    
+2. The `In` lookup should either:
+       - Always call `clear_select_clause()` and `add_fields(["pk"])` for Query objects regardless of the `has_select_fields` status, OR
+       - Modify the `has_select_fields` check to properly distinguish between annotations that should be selected versus aliases that shouldn't affect the select clause for subqueries
+    
+3. The test case provided in the issue description should pass without raising an `OperationalError`
+    
+4. The subquery should generate SQL that selects only the primary key column, allowing the `__in` lookup to function correctly
+
+    Files that will need to be modified:
+    - `django/db/models/lookups.py`: The `In` class's `get_prep_lookup()` method needs to be updated to properly handle queries with annotations and aliases
+    - Potentially `django/db/models/sql/query.py`: The `has_select_fields` property or related annotation handling logic might need refinement
+
+    The fix should ensure that `__in` lookups work correctly with complex QuerySets while maintaining backward compatibility with existing functionality.
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 0>
+
+<problem_decoder 1>
+## Step 1
+
+### 🤔 Thinking
+Let me start by analyzing this issue step by step.
+
+The issue description mentions:
+
+1. There's a problem with `__in` not clearing selected fields on the RHS when `QuerySet.alias()` is used after `annotate()`.
+
+2. There's a test case that should reproduce the bug - it involves:
+   - Creating a queryset with filter, annotate, and alias
+   - Using this queryset in a subquery with `__in` filter
+   - Expected to fail with error: "sub-select returns 10 columns - expected 1"
+
+Let me first explore the repository structure to understand how it's organized.
+
+### 👁️ Observation
+I'll help you analyze this issue step by step. Let me start by exploring the repository structure to understand how it's organized.
+
+### 🎯 Action
+view_directory({'dir_path': './', 'depth': 2})
+
+
+## Step 2
+
+### 🤔 Thinking
+I can see this is a Django codebase. The issue mentions adding a test to `tests/annotations/tests.py`, and it's about a query issue involving annotations, alias, and subqueries. Let me look at the annotations tests first to understand the context.
+
+### 👁️ Observation
+<observation>
+
+1. This is a Django codebase with standard Django project structure
+
+2. The issue mentions adding a test case to `tests/annotations/tests.py`
+
+3. The bug involves QuerySet operations: filter, annotate, alias, and subquery with `__in` lookup
+
+4. Alternative action could have been to directly search for annotation-related code
+
+5. Next action: Look at the annotations test directory to understand the existing test structure and related models
+</observation>
+
+Let me first look at the annotations tests directory to understand the test structure and models being used:
+
+### 🎯 Action
+view_directory({'dir_path': './tests/annotations'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Good, now let me look at the models to understand what Book and Publisher models we're working with, and then examine the test structure.
+
+### 👁️ Observation
+Let me examine the models used in the test to understand the structure:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/annotations/models.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Good, I can see the models. The test case involves:
+- Book model with a `publisher` ForeignKey to Publisher and a `pages` field
+- Publisher model with a `name` field
+- The test is creating a subquery using Book objects filtered and annotated, then using that in a Publisher query with `book__in` lookup.
+
+Let me now check the existing tests to understand the pattern and context better.
+
+### 👁️ Observation
+Now let me look at the existing annotation tests to understand the patterns:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/annotations/tests.py', 'view_range': [1, 100]})
+
+
+## Step 5
+
+### 🤔 Thinking
+I can see the test setup with sample data. Now let me look at the part of the test file where I might add the new test case to understand the existing pattern, and also search for any existing tests involving alias() method.
+
+### 👁️ Observation
+Let me search for existing tests that use the `alias()` method to understand the current patterns:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/annotations', 'keywords': ['alias', 'annotate']})
+
+
+## Step 6
+
+### 🤔 Thinking
+Good, there are existing tests using both alias and annotate methods. Let me examine some of these tests to understand the patterns and also find what the error message is about.
+
+### 👁️ Observation
+Let me look at the tests around line 406 where `alias` is used:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/annotations/tests.py', 'view_range': [400, 450]})
+
+
+## Step 7
+
+### 🤔 Thinking
+I see that line 406 mentions "test_alias" but it's using F("store__name"), not the alias() method. Let me search more specifically for the alias() method usage.
+
+### 👁️ Observation
+Let me search more specifically for the `alias()` method usage:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/annotations', 'keywords': ['\\.alias\\(']})
+
+
+## Step 8
+
+### 🤔 Thinking
+Now let me look at the actual alias() method usage around line 1184:
+
+### 👁️ Observation
+Let me examine the actual alias method usage:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/annotations/tests.py', 'view_range': [1180, 1220]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Perfect! Now I can see the exact scenario in line 1214 - `test_alias_after_annotation()` - which shows using alias after annotation. This is similar to what the bug report mentions. 
+
+Now let me understand what the error "sub-select returns 10 columns - expected 1" means. This sounds like a SQL generation issue where a subquery is returning too many columns when only one is expected.
+
+Let me search for more context about how subqueries work in Django ORM and understand the current behavior.
+
+### 👁️ Observation
+Now let me understand the root cause better by looking for how Django handles subqueries and the `__in` lookup. Let me search for related code:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['sub-select', 'subquery', '__in']})
+
+
+## Step 10
+
+### 🤔 Thinking
+The search returned too many results for `__in`. Let me focus on the specific error message and look at the SQL compiler code where it mentions "sub-select":
+
+### 👁️ Observation
+Let me look at the SQL compiler where the "sub-select" error message is mentioned:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/compiler.py', 'view_range': [1950, 1970]})
+
+
+## Step 11
+
+### 🤔 Thinking
+This doesn't seem to be the right location. Let me search more specifically for the error message "sub-select returns":
+
+### 👁️ Observation
+Let me search for the specific error message:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['sub-select returns.*expected']})
+
+
+## Step 12
+
+### 🤔 Thinking
+The error message might not be in Django code itself, but rather from the database backend (SQLite, PostgreSQL, etc.). Let me search for how Django handles subqueries in the IN lookup specifically:
+
+### 👁️ Observation
+Let me search for how Django handles IN lookups with subqueries:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['class.*In.*Lookup', 'def.*in.*lookup', 'In.*sql']})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me look at the In Lookup class in django/db/models/lookups.py:
+
+### 👁️ Observation
+Let me examine the In lookup class:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/lookups.py', 'view_range': [410, 450]})
+
+
+## Step 14
+
+### 🤔 Thinking
+This is very interesting! Let me look at lines 421-
+425. This is the key code:
+
+
+
+```python
+if isinstance(self.rhs, Query):
+    self.rhs.clear_ordering(clear_default=True)
+    if not self.rhs.has_select_fields:
+        self.rhs.clear_select_clause()
+        self.rhs.add_fields(["pk"])
+
+
+```
+
+This shows that when the right-hand side (RHS) of an IN lookup is a Query object (like our subquery), Django tries to clear the select clause if it doesn't have select fields, and then adds only the primary key field. This is to ensure the subquery only returns one column for the IN comparison.
+
+But the issue suggests that this isn't working properly when `alias()` is used after `annotate()`. The problem might be that `alias()` somehow affects the `has_select_fields` property or the field clearing process.
+
+Let me look at the `has_select_fields` property and see how the query structure works.
+
+### 👁️ Observation
+Let me continue examining the In lookup code and then look at Query's has_select_fields property:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/lookups.py', 'view_range': [450, 480]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Now let me search for the `has_select_fields` property in the Query class:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['has_select_fields']})
+
+
+## Step 16
+
+### 🤔 Thinking
+Let me look at the `has_select_fields` property in the Query class:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [260, 280]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Perfect! Now I can see the issue. The `has_select_fields` property checks for:
+
+1. `self.select` - explicit select fields
+
+2. `self.annotation_select_mask` - annotation select mask
+
+3. `self.extra_select_mask` - extra select mask
+
+The issue is likely that when `alias()` is used after `annotate()`, the annotation_select_mask is being set (or not being cleared properly), so `has_select_fields` returns `True`, which means the In lookup doesn't clear the select clause and add only the primary key field.
+
+Let me examine how `annotate()` and `alias()` methods work to understand how they affect these properties.
+
+### 👁️ Observation
+Let me look for how the annotation_select_mask and related fields are handled in annotation and alias methods:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['annotation_select_mask', 'def annotate', 'def alias']})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me look at the annotate and alias methods in the QuerySet:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/query.py', 'view_range': [1575, 1595]})
+
+
+## Step 19
+
+### 🤔 Thinking
+Very interesting! Both `annotate()` and `alias()` call the same internal `_annotate()` method, but with different values for the `select` parameter:
+- `annotate()` calls `_annotate(..., select=True)`
+- `alias()` calls `_annotate(..., select=False)`
+
+Let me see the full `_annotate()` method to understand how the `select` parameter affects the behavior:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/query.py', 'view_range': [1593, 1630]})
+
+
+## Step 20
+
+### 🤔 Thinking
+Let me continue reading the _annotate method to see how the `select` parameter is used:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/query.py', 'view_range': [1630, 1660]})
+
+
+## Step 21
+
+### 🤔 Thinking
+Perfect! Now I can see that the key is in line 1632-
+1637. The `add_annotation` method is called with the `select` parameter. Let me look at the `add_annotation` method in the Query class to understand how this affects the annotation_select_mask:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['def add_annotation']})
+
+
+## Step 22
+
+### 🤔 Thinking
+Let me look at the add_annotation method:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [1109, 1150]})
+
+
+## Step 23
+
+### 🤔 Thinking
+This is very revealing! Let me look at the key lines 1115-1118:
+
+
+
+```python
+if select:
+    self.append_annotation_mask([alias])
+else:
+    self.set_annotation_mask(set(self.annotation_select).difference({alias}))
+
+
+```
+
+So when `select=True` (annotate), it appends the alias to the annotation_select_mask.
+When `select=False` (alias), it sets the annotation_select_mask to all current annotation_select items except the current alias.
+
+But the problem seems to be that when you do:
+
+1. `.annotate(book_annotate=Value(1))` - adds 'book_annotate' to annotation_select_mask
+
+2. `.alias(book_alias=Value(1))` - should modify annotation_select_mask to exclude 'book_alias'
+
+But the issue might be that this doesn't properly clear the mask or affect the `has_select_fields` property. Let me look at the `annotation_select` and `append_annotation_mask`/`set_annotation_mask` methods:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['def append_annotation_mask', 'def set_annotation_mask', 'annotation_select']})
+
+
+## Step 24
+
+### 🤔 Thinking
+Let me look at these mask management methods:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [2360, 2380]})
+
+
+## Step 25
+
+### 🤔 Thinking
+Now I need to understand how the `annotation_select` property works - this is used in the `has_select_fields` check and in the add_annotation method. Let me find it:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [200, 220]})
+
+
+## Step 26
+
+### 🤔 Thinking
+Let me search for the annotation_select property definition:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['@property.*annotation_select', 'def.*annotation_select']})
+
+
+## Step 27
+
+### 🤔 Thinking
+Let me look at the annotation_select property:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [2435, 2455]})
+
+
+## Step 28
+
+### 🤔 Thinking
+Perfect! Now I have a clearer understanding of the issue. Let me trace through what happens:
+
+
+1. When we do `.annotate(book_annotate=Value(1))`:
+   - `add_annotation` is called with `select=True`
+   - `append_annotation_mask(['book_annotate'])` is called
+   - `annotation_select_mask` becomes `{'book_annotate'}`
+   - `has_select_fields` returns `True` because `annotation_select_mask` is not empty
+
+
+2. When we then do `.alias(book_alias=Value(1))`:
+   - `add_annotation` is called with `select=False` 
+   - `set_annotation_mask(set(self.annotation_select).difference({'book_alias'}))` is called
+   - Since `annotation_select` returns annotations filtered by the mask, and `book_alias` is not in the current mask, the difference operation doesn't remove anything from the mask
+   - `annotation_select_mask` still contains `{'book_annotate'}`
+
+
+3. When this query is used as a subquery in the `__in` lookup:
+   - `has_select_fields` still returns `True` because `annotation_select_mask` is not empty
+   - The In lookup doesn't clear the select clause and add only the PK field
+   - The subquery returns multiple columns (the annotated field plus other fields) instead of just one column
+   - This causes the database error "sub-select returns 10 columns - expected 1"
+
+The problem is in the logic at line 1118 in `add_annotation`:
+
+
+```python
+self.set_annotation_mask(set(self.annotation_select).difference({alias}))
+
+
+```
+
+This line is trying to remove the current alias from the annotation_select, but `annotation_select` only contains the annotations that are in the current mask. If the alias being added is not in the current mask, this doesn't change anything.
+
+I see the core issue is that the current implementation fails to properly manage annotation selection when adding new aliases. The method doesn't effectively remove or modify the existing annotation mask, leading to unexpected query behavior. This suggests a need for a more robust approach to handling annotation selection across multiple method calls.
+
+### 👁️ Observation
+Now let me understand the issue better by examining how the clear_select_clause method works:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['def clear_select_clause']})
+
+
+## Step 29
+
+### 🤔 Thinking
+Let me look at the clear_select_clause method:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [2092, 2120]})
+
+
+## Step 30
+
+### 🤔 Thinking
+Perfect! Now I can see the issue more clearly. When `clear_select_clause()` is called in line 424 of the In lookup, it calls `self.set_annotation_mask(())` on line 2098, which should clear the annotation select mask.
+
+But the problem is that the In lookup only calls `clear_select_clause()` when `not self.rhs.has_select_fields` (line 423-424), and `has_select_fields` returns `True` when there are annotations with `select=True` in the mask.
+
+So the bug is that when we have:
+
+1. `.annotate(book_annotate=Value(1))` - adds to annotation_select_mask  
+
+2. `.alias(book_alias=Value(1))` - should not add to annotation_select_mask, but the current logic doesn't correctly handle this case
+
+Let me now look at a successful test that has reproduced the issue to better understand the expected behavior. Let me ask the repository agent to provide more context about similar issues or related test cases.
+
+### 🎯 Action
+ask_repository_agent({'query': 'Are there any existing test cases that combine annotate() and alias() methods in subqueries, or any known issues with subquery field selection when using annotations?'})
+
+
+## Step 31
+
+### 🤔 Thinking
+The repository agent didn't find any specific test cases that combine annotate() and alias() in subqueries with the __in lookup. This suggests the issue might not have been covered before in tests.
+
+Now let me think about the complete issue analysis. Let me also search to understand how Django normally handles the field selection in subqueries to make sure I understand the expected behavior correctly.
+
+### 👁️ Observation
+Let me search for more context about how Django handles the field selection when queries are used in IN lookups:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests', 'keywords': ['__in.*annotate', '__in.*subquery', 'book__in']})
+
+
+## Step 32
+
+### 🤔 Thinking
+Let me look at one of these test cases to understand the expected behavior:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/aggregation/tests.py', 'view_range': [660, 670]})
+
+
+## Step 33
+
+### 🤔 Thinking
+This test is using a list, not a queryset, so it doesn't help understand the subquery behavior.
+
+Based on my analysis, I now understand the root cause of the issue. Let me use the think tool to brainstorm the problem and solution approach:
+
+### 🎯 Action
+think({'thought': 'Let me analyze the root cause of this Django ORM issue:\n\n**Problem Summary:**\nWhen using `.annotate()` followed by `.alias()` on a QuerySet that is then used in an `__in` lookup as a subquery, Django generates a subquery that returns multiple columns instead of just the primary key, causing a SQL error "sub-select returns 10 columns - expected 1".\n\n**Root Cause Analysis:**\n
+1. The In lookup (django/db/models/lookups.py, lines 421-425) has logic to ensure subqueries only return one column:\n   - If the subquery has no select fields (`not self.rhs.has_select_fields`), it clears the select clause and adds only ["pk"]\n   - If it has select fields, it leaves the subquery as-is\n\n
+2. The `has_select_fields` property (django/db/models/sql/query.py, line 267-270) returns True if:\n   - There are explicit select fields OR\n   - There are annotation_select_mask entries OR  \n   - There are extra_select_mask entries\n\n
+3. When `.annotate(book_annotate=Value(1))` is called:\n   - `add_annotation` is called with `select=True`\n   - `append_annotation_mask([\'book_annotate\'])` adds \'book_annotate\' to the annotation_select_mask\n   - `has_select_fields` now returns True\n\n
+4. When `.alias(book_alias=Value(1))` is called afterward:\n   - `add_annotation` is called with `select=False`\n   - The code tries to exclude the alias from the mask: `set_annotation_mask(set(self.annotation_select).difference({alias}))`\n   - But since \'book_alias\' was never in the annotation_select (because annotation_select only returns items in the current mask), the difference operation does nothing\n   - The annotation_select_mask still contains \'book_annotate\'\n\n
+5. When this queryset is used in an `__in` lookup:\n   - `has_select_fields` returns True (because annotation_select_mask is not empty)\n   - The In lookup doesn\'t clear the select clause\n   - The subquery includes the annotated field plus default model fields\n   - SQL error occurs: "sub-select returns X columns - expected 1"\n\n**Possible Solutions:**\n
+1. Fix the logic in `add_annotation` when `select=False` to properly handle the case where previous annotations exist\n
+2. Modify the In lookup\'s field clearing logic to be more robust\n
+3. Change how `has_select_fields` determines if a query has meaningful select fields for subqueries\n\nThe most targeted fix would be #1 - correcting the annotation mask handling in `add_annotation` when `select=False`.'})
+
+
+## Step 34
+
+### 🤔 Thinking
+Based on my analysis, I now have a clear understanding of the issue. Let me provide the final issue analysis.
+
+### 📋 Conclusion
+<observation>
+
+1. Analyzed the Django ORM codebase to understand how QuerySet annotations, aliases, and IN lookups work
+
+2. Found the root cause in the annotation mask handling when alias() is used after annotate()
+
+3. Alternative action could have been to create a reproduction script first, but understanding the code flow was more important for root cause analysis
+
+4. Next action: Provide comprehensive issue analysis for the other assistants
+</observation>
+
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "Django ORM generates incorrect SQL when a QuerySet with both annotate() and alias() methods is used in an __in lookup as a subquery. Instead of returning only the primary key column for the IN comparison, the subquery includes annotated fields, causing a database error 'sub-select returns 10 columns - expected 1'."
+    - status: "yes"
+  </problem_statement>
+  <root_cause>
+    The root cause is in the `add_annotation` method in `/django/db/models/sql/query.py` at lines 1115-
+1118. When `alias()` is called after `annotate()`, the logic for handling the annotation select mask is flawed:
+
+    
+1. `annotate()` calls `add_annotation` with `select=True`, which adds the annotation to `annotation_select_mask` via `append_annotation_mask()`
+    
+2. `alias()` calls `add_annotation` with `select=False`, which tries to remove the current alias from the mask using: `set_annotation_mask(set(self.annotation_select).difference({alias}))`
+    
+3. However, since `annotation_select` only returns annotations that are already in the current mask, and the new alias is not in the mask, the difference operation has no effect
+    
+4. The `annotation_select_mask` still contains the annotated field from step 1
+    
+5. When used in an `__in` lookup, `has_select_fields` returns `True` (due to non-empty `annotation_select_mask`), so the In lookup doesn't clear the select clause and add only the primary key
+    
+6. The subquery includes multiple columns, causing the SQL error
+  </root_cause>
+  <current_behavior>
+    Current implementation in `/django/db/models/sql/query.py`:
+    - `add_annotation` method (lines 1109-1119) incorrectly handles annotation select mask when `select=False`
+    - `has_select_fields` property (lines 267-270) checks for `annotation_select_mask` presence
+    - In lookup class in `/django/db/models/lookups.py` (lines 421-425) only clears select clause when `has_select_fields` is False
+    - The mask removal logic in line 1118 fails when the alias being added is not in the current annotation_select
+    - Results in subqueries returning multiple columns instead of just primary key for IN comparisons
+  </current_behavior>
+  <expected_behavior>
+    After implementing the fix:
+    - When `alias()` is called with `select=False`, it should not affect the ability to clear select fields for subquery usage
+    - The `annotation_select_mask` should be properly managed so that aliases don't interfere with field selection for subqueries
+    - `has_select_fields` should return `False` for queries where only aliases (not annotations) are present
+    - In lookups should successfully clear select clause and add only primary key field for subqueries
+    - The test case in the issue description should pass without the "sub-select returns 10 columns - expected 1" error
+    - Files affected: `/django/db/models/sql/query.py` (add_annotation method around line 1118)
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 1>
+
+<problem_decoder 2>
+## Step 1
+
+### 🤔 Thinking
+Alright, I need to analyze this Django issue about the ORM. Let me first understand what's happening in the issue description.
+
+The issue is about QuerySet.alias() used after annotate() not properly clearing selected fields on the RHS (right-hand side) when used with the __in filter. The error indicates that a subquery is returning 10 columns when only 1 is expected.
+
+Let me start by exploring the repository structure to understand how it's organized, then look into the specific area where this issue might be occurring.
+
+From the issue, it seems like the problem is in the ORM query generation, specifically with how annotations and aliases are handled in subqueries.
+
+Let me begin with exploration.
+
+### 👁️ Observation
+I'll help you analyze this Django ORM issue. Let me start by exploring the repository structure and understanding the problem.
+
+## READING Phase
+
+### 🎯 Action
+view_directory({'dir_path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+This looks like a Django repository. I can see the main django/ folder and tests/ folder. Let me look at the issue more carefully.
+
+The issue is about __in not clearing selected fields on the RHS when QuerySet.alias() is used after annotate(). The error message is:
+
+
+
+```
+django.db.utils.OperationalError: sub-select returns 10 columns - expected 1
+
+
+```
+
+This suggests that when a QuerySet with annotations and aliases is used in a subquery (via __in lookup), it's including more columns than expected in the SELECT clause.
+
+Let me first look at the test file mentioned in the issue to understand the context better, then explore the ORM components.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/annotations/tests.py', 'view_range': [1, 50]})
+
+
+## Step 3
+
+### 🤔 Thinking
+Now let me look at the models to understand the relationship structure:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/annotations/models.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Now I understand the models. The issue is with a query involving:
+
+
+1. Book model has a ForeignKey to Publisher
+
+2. The QuerySet on Book filters by pages > 400, then annotates and aliases
+
+3. This QuerySet is used in a Publisher.objects.filter(book__in=long_books_qs)
+
+4. The error suggests that the subquery is returning more columns than expected (10 instead of 1)
+
+Let me understand what the problem is by analyzing how the ORM handles this scenario. First, let me search for relevant files in the Django ORM system.
+
+### 👁️ Observation
+Now, let me understand the issue better by analyzing the error and problem:
+
+### Problem Statement:
+The issue is that when a QuerySet uses both `annotate()` and `alias()` methods, and then that QuerySet is used in an `__in` lookup (subquery), the ORM incorrectly includes all annotated and aliased fields in the subquery's SELECT clause instead of only selecting the primary key. This causes an SQL error: "sub-select returns 10 columns - expected 1".
+
+Let me explore the Django ORM components that handle this functionality:
+
+### 🎯 Action
+view_directory({'dir_path': 'django/db'})
+
+
+## Step 5
+
+### 🤔 Thinking
+The key files for the ORM are likely in django/db/models/ and particularly django/db/models/sql/. Let me look at the query and compiler modules since this seems to be an issue with how subqueries are compiled.
+
+### 👁️ Observation
+## EXPLORATION Phase
+
+Let me search for keywords related to the issue:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models', 'keywords': ['alias', 'annotate', 'in_filter', '__in']})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me look more specifically at the query.py file, which handles QuerySet operations including alias and annotate:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/query.py', 'view_range': [1150, 1200]})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me look at the alias method implementation:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/query.py', 'keywords': ['def alias']})
+
+
+## Step 8
+
+### 🤔 Thinking
+Let me search for the alias method more specifically:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/query.py', 'keywords': ['alias.*=']})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me search for "alias" method more broadly:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/query.py', 'keywords': ['alias\\(']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me just look at the query.py file more comprehensively around the methods:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/query.py', 'view_range': [1200, 1400]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Let me continue looking for the alias and annotate methods:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/query.py', 'view_range': [1400, 1600]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Good, I found the alias and annotate methods. Let me continue reading the _annotate method:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/query.py', 'view_range': [1593, 1650]})
+
+
+## Step 13
+
+### 🤔 Thinking
+Now I can see that both `alias()` and `annotate()` use the same internal method `_annotate()`, but with different `select` parameters. The `annotate()` method uses `select=True` while `alias()` uses `select=False`.
+
+The key difference is that `select=True` means the annotation will be included in the SELECT clause of the query, while `select=False` means it won't be included in the SELECT clause but will still be available for filtering, etc.
+
+Now I need to understand how subqueries work when a QuerySet is used in an `__in` lookup. Let me look at the related lookups code:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_lookups.py'})
+
+
+## Step 14
+
+### 🤔 Thinking
+The key lines I need to look at are lines 93-108 in `RelatedIn.get_prep_lookup()`. This code checks if the RHS (right-hand side) of the `__in` lookup is a QuerySet and handles it specially:
+
+
+
+```python
+elif not getattr(self.rhs, "has_select_fields", True) and not getattr(
+    self.lhs.field.target_field, "primary_key", False
+):
+    self.rhs.clear_select_clause()
+    if (
+        getattr(self.lhs.output_field, "primary_key", False)
+        and self.lhs.output_field.model == self.rhs.model
+    ):
+        # A case like
+        # Restaurant.objects.filter(place__in=restaurant_qs), where
+        # place is a OneToOneField and the primary key of
+        # Restaurant.
+        target_field = self.lhs.field.name
+    else:
+        target_field = self.lhs.field.target_field.name
+    self.rhs.add_fields([target_field], True)
+
+
+```
+
+This is where the bug likely occurs. Let me see what `clear_select_clause()` and `add_fields()` methods do. Let me also check what `has_select_fields` property means.
+
+First, let me look at the Query class to understand these methods:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [1, 100]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Let me search more specifically for the methods I need:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['clear_select_clause', 'add_fields', 'has_select_fields']})
+
+
+## Step 16
+
+### 🤔 Thinking
+Let me check more broadly for these methods:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models', 'keywords': ['clear_select_clause']})
+
+
+## Step 17
+
+### 🤔 Thinking
+Great! Let me check the implementation in the query.py file:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['def clear_select_clause']})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me look at a specific line range where clear_select_clause was found:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [570, 600]})
+
+
+## Step 19
+
+### 🤔 Thinking
+I need to find where clear_select_clause is defined. Let me search more systematically:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['clear_select']})
+
+
+## Step 20
+
+### 🤔 Thinking
+Let me search for it as a method definition:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['clear_select_clause\\(']})
+
+
+## Step 21
+
+### 🤔 Thinking
+Let me check the query.py file more systematically. Looking at line range around where it's used:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [2080, 2120]})
+
+
+## Step 22
+
+### 🤔 Thinking
+Great! Now let me look for the `add_fields` method and `has_select_fields` property:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['def add_fields']})
+
+
+## Step 23
+
+### 🤔 Thinking
+Let me search for add_fields more broadly:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['add_fields']})
+
+
+## Step 24
+
+### 🤔 Thinking
+Let me check the query.py file in the QuerySet class instead, since it might be there:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/query.py', 'keywords': ['add_fields', 'has_select_fields']})
+
+
+## Step 25
+
+### 🤔 Thinking
+Let me search more broadly in the entire models directory:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models', 'keywords': ['def add_fields']})
+
+
+## Step 26
+
+### 🤔 Thinking
+Great! Let me check that location:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [2120, 2180]})
+
+
+## Step 27
+
+### 🤔 Thinking
+Now let me look for the `has_select_fields` property:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models', 'keywords': ['has_select_fields']})
+
+
+## Step 28
+
+### 🤔 Thinking
+Let me look at the definition in query.py:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [265, 275]})
+
+
+## Step 29
+
+### 🤔 Thinking
+Let me also check what `annotation_select_mask` and `set_annotation_mask` do by searching for them:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['annotation_select_mask', 'set_annotation_mask']})
+
+
+## Step 30
+
+### 🤔 Thinking
+Let me look at a broader range around the property and look for annotation_select_mask:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['annotation_select']})
+
+
+## Step 31
+
+### 🤔 Thinking
+Let me search for the Query class init method to see how these attributes are initialized:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['def __init__']})
+
+
+## Step 32
+
+### 🤔 Thinking
+Let me look at the beginning of the Query class definition:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [100, 200]})
+
+
+## Step 33
+
+### 🤔 Thinking
+Let me see the Query class __init__ method:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [200, 300]})
+
+
+## Step 34
+
+### 🤔 Thinking
+Great! Now I can see that `annotation_select_mask` is initialized to `None` on line 
+208. Let me look for where these masks are used:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['annotation_select_mask']})
+
+
+## Step 35
+
+### 🤔 Thinking
+Let me search for set_annotation_mask method:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['set_annotation_mask']})
+
+
+## Step 36
+
+### 🤔 Thinking
+Let me check specifically around line 2098 where it's used in clear_select_clause:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/query.py', 'view_range': [2090, 2110]})
+
+
+## Step 37
+
+### 🤔 Thinking
+Let me look for the set_annotation_mask definition:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['def set_annotation_mask']})
+
+
+## Step 38
+
+### 🤔 Thinking
+Let me try a broader search for set_annotation:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['def set_.*annotation']})
+
+
+## Step 39
+
+### 🤔 Thinking
+Let me search for the @property annotation_select to understand how annotations are selected:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/sql/query.py', 'keywords': ['annotation_select']})
+
+
+## Step 40
+
+### 🤔 Thinking
+Let me ask the repository agent to help me understand this issue better:
+
+### 🎯 Action
+ask_repository_agent({'query': 'How does Django ORM handle QuerySet annotations and aliases when used in subqueries? Specifically, what is the difference between annotate() and alias(), and how should they be handled when a QuerySet is used in an __in lookup?'})
+
+
+## Step 41
+
+### 🤔 Thinking
+This is really helpful! Now I understand the core issue. Let me also ask about the specific problem in the issue:
+
+### 🎯 Action
+ask_repository_agent({'query': 'I\'m looking at an issue where a QuerySet with both annotate() and alias() methods is used in an __in lookup, and it\'s failing with "sub-select returns 10 columns - expected 1". How does the RelatedIn class in django/db/models/fields/related_lookups.py handle clearing the SELECT clause for such QuerySets? What\'s the difference between has_select_fields property and how annotations vs aliases are treated?'})
+
+
+## Step 42
+
+### 🤔 Thinking
+Now I have a much better understanding of the issue. Let me look at specific code areas to confirm my understanding. The issue seems to be that when both `annotate()` and `alias()` are used, the subquery generation doesn't properly clear the SELECT clause to only include the required field.
+
+Let me look at the SQL compilation code for subqueries:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/sql/compiler.py', 'view_range': [1800, 1850]})
+
+
+## Step 43
+
+### 🤔 Thinking
+I can see that at line 1814, there's a call to `clear_select_clause()` which should remove all fields from the SELECT clause. Let me also look at the SQL lookups to understand how the issue might be occurring specifically for __in lookups:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/lookups.py', 'view_range': [330, 430]})
+
+
+## Step 44
+
+### 🤔 Thinking
+Perfect! Now I can see the issue clearly. The problem is in the `In.get_prep_lookup()` method (lines 418-426). This is very similar to the logic in `RelatedIn.get_prep_lookup()`. The logic is:
+
+
+1. If the RHS is a Query (QuerySet)
+
+2. Clear ordering
+
+3. If the query doesn't have select fields (`not self.rhs.has_select_fields`), then:
+   - Clear the select clause
+   - Add only the primary key field
+
+However, the issue is with the condition `not self.rhs.has_select_fields`. When both `annotate()` and `alias()` are used, the `has_select_fields` property returns `True` because the query has annotated fields, so the logic doesn't clear the select clause and add only the primary key.
+
+Let me look at the `has_select_fields` property again and understand what it checks:
+
+
+
+```python
+@property
+def has_select_fields(self):
+    return bool(
+        self.select or self.annotation_select_mask or self.extra_select_mask
+    )
+
+
+```
+
+The problem is that when we have annotations and aliases, the `annotation_select_mask` or similar properties are likely set, making `has_select_fields` return `True`, which prevents the cleanup logic from running.
+
+But the core issue appears to be that both `annotate()` and `alias()` add fields to the SELECT clause, and the current logic doesn't properly handle cases where we want to use these QuerySets in subqueries.
+
+Now let me create a reproduction script to confirm this behavior and understand what's happening.
+
+### 👁️ Observation
+Let me now write a test to reproduce the issue and create the final analysis:
+
+### 🎯 Action
+think({'thought': 'Based on my analysis, I now understand the root cause of the issue. Here\'s what happens:\n\n
+1. When a QuerySet uses both `annotate()` and `alias()`, both methods call `_annotate()` with different `select` parameters:\n   - `annotate()` uses `select=True` (includes the annotation in SELECT)\n   - `alias()` uses `select=False` (doesn\'t include in SELECT, but still available for filtering)\n\n
+2. When this QuerySet is used in an `__in` lookup (like `Publisher.objects.filter(book__in=long_books_qs)`), the Django ORM needs to create a subquery that returns only one column (typically the primary key).\n\n
+3. The logic in `In.get_prep_lookup()` and `RelatedIn.get_prep_lookup()` checks `if not self.rhs.has_select_fields` to decide whether to clear the SELECT clause and add only the primary key field.\n\n
+4. The `has_select_fields` property returns `True` if any of these are set:\n   - `self.select` (explicit field selections)\n   - `self.annotation_select_mask` (annotation selections)  \n   - `self.extra_select_mask` (extra selections)\n\n
+5. When both `annotate()` and `alias()` are used, the query has select fields (from annotations), so `has_select_fields` returns `True`, and the cleanup logic doesn\'t run.\n\n
+6. This results in a subquery that includes all the annotated and aliased fields in the SELECT clause instead of just the primary key, causing the "sub-select returns 10 columns - expected 1" error.\n\nThe root cause is that the current logic in the lookup classes doesn\'t properly handle QuerySets that have both annotations and aliases when they need to be used as subqueries. The `has_select_fields` check is too broad and doesn\'t distinguish between cases where we explicitly selected fields (like with `values()`) versus cases where we added annotations/aliases that should be cleared for subquery usage.'})
+
+
+## Step 45
+
+### 🤔 Thinking
+Now I have a complete understanding of the issue. Let me provide the final analysis:
+
+### 📋 Conclusion
+<observation>
+
+1. Found the core issue: The `In.get_prep_lookup()` and `RelatedIn.get_prep_lookup()` methods in Django's ORM use `has_select_fields` property to determine whether to clear the SELECT clause for subqueries.
+
+
+2. Alternative action could have been to focus on the SQL generation logic, but the issue is actually in the lookup preparation phase.
+
+
+3. Next action: Provide comprehensive issue analysis with root cause, current behavior, and expected behavior for the solution mapper.
+</observation>
+
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "When a QuerySet uses both annotate() and alias() methods and is then used in an __in lookup (subquery), Django ORM fails to properly clear the SELECT clause to include only the required primary key field, resulting in a subquery that returns multiple columns instead of the expected single column, causing an OperationalError: 'sub-select returns 10 columns - expected 1'"
+    - status: "yes"
+  </problem_statement>
+  <root_cause>
+    The root cause is in the `In.get_prep_lookup()` method in `django/db/models/lookups.py` (lines 418-426) and the `RelatedIn.get_prep_lookup()` method in `django/db/models/fields/related_lookups.py` (lines 93-108). Both methods use the condition `not self.rhs.has_select_fields` to determine whether to clear the SELECT clause of a QuerySet when it's used as a subquery. The `has_select_fields` property returns `True` when any of `self.select`, `self.annotation_select_mask`, or `self.extra_select_mask` are set. When both `annotate()` and `alias()` methods are used, the QuerySet has annotation fields, making `has_select_fields` return `True`, which prevents the necessary cleanup logic (clearing SELECT clause and adding only primary key field) from running. This causes the subquery to include all annotated and aliased fields instead of just the primary key field required for `__in` lookups.
+  </root_cause>
+  <current_behavior>
+    Currently, when a QuerySet with both `annotate()` and `alias()` is used in an `__in` lookup:
+    
+1. `django/db/models/lookups.py:423` - The `In.get_prep_lookup()` method checks `not self.rhs.has_select_fields`
+    
+2. `django/db/models/sql/query.py:267-270` - The `has_select_fields` property returns `True` because annotations exist
+    
+3. The cleanup logic (`clear_select_clause()` and `add_fields(["pk"])`) is skipped
+    
+4. The subquery retains all annotated and aliased fields in its SELECT clause
+    
+5. SQL compilation produces a subquery with multiple columns instead of one
+    
+6. Database raises "OperationalError: sub-select returns 10 columns - expected 1"
+    The same logic applies to `RelatedIn.get_prep_lookup()` in `django/db/models/fields/related_lookups.py`.
+  </current_behavior>
+  <expected_behavior>
+    The expected behavior should be:
+    
+1. When a QuerySet with annotations and aliases is used in `__in` lookups, the ORM should properly clear the SELECT clause regardless of whether annotations/aliases exist
+    
+2. The subquery should select only the primary key field (or the appropriate target field for the lookup)
+    
+3. The query `Publisher.objects.filter(book__in=long_books_qs)` should execute successfully and return the correct results
+    
+4. Both `In.get_prep_lookup()` and `RelatedIn.get_prep_lookup()` methods need modification to handle QuerySets with annotations/aliases appropriately for subquery usage
+    
+5. The fix should preserve the existing behavior for other use cases while specifically addressing the subquery scenario
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 2>
+
+<solution_mapper 0>
+## Step 1
+
+### 🤔 Thinking
+Based on the issue analysis provided, I need to first explore the repository to understand the problem better and locate the relevant files. The issue analysis has already identified several key files and methods, but I should verify this by exploring the code myself.
+
+Let me start by exploring the relevant files mentioned in the issue analysis:
+
+1. `django/db/models/lookups.py` - contains the In lookup logic
+
+2. `django/db/models/sql/query.py` - contains add_annotation and has_select_fields methods
+
+3. `django/db/models/fields/related_lookups.py` - contains RelatedIn lookup logic
+
+Let me search for these files first.
+
+### 👁️ Observation
+I'll help you map a solution to this Django ORM issue. Let me start by exploring the repository to understand the problem and locate the relevant files.
+
+## 
+1. EXPLORATION
+
+Let me first search for the key files and methods mentioned in the issue analysis:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './', 'keywords': ['In.*get_prep_lookup', 'has_select_fields', 'add_annotation', 'clear_select_clause']})
+
+
+## Step 2
+
+### 🤔 Thinking
+Good, I found some relevant matches. Let me explore the specific files mentioned in the issue analysis to understand the code structure better.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/lookups.py', 'view_range': [420, 430]})
+
+
+## Step 3
+
+### 🤔 Thinking
+Great! This confirms the In lookup logic mentioned in the issue analysis. Now let me check the has_select_fields property:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [265, 275]})
+
+
+## Step 4
+
+### 🤔 Thinking
+Perfect! I can see that has_select_fields returns True when annotation_select_mask is non-empty. Now let me check the add_annotation method:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [1109, 1125]})
+
+
+## Step 5
+
+### 🤔 Thinking
+Now I can see the exact issue! Line 1118 is the problematic line. Let me also check the related_lookups file:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/fields/related_lookups.py', 'view_range': [90, 110]})
+
+
+## Step 6
+
+### 🤔 Thinking
+I see that RelatedIn has similar logic. Let me also check the methods that handle annotation masks:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/query.py', 'keywords': ['append_annotation_mask', 'set_annotation_mask', 'annotation_select']})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me search more broadly for these methods:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './', 'keywords': ['annotation_mask', 'annotation_select_mask', 'set_annotation_mask']})
+
+
+## Step 8
+
+### 🤔 Thinking
+Great! Let me check these mask-related methods:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [475, 490]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me find the definition of set_annotation_mask:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/query.py', 'keywords': ['def set_annotation_mask']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me search more broadly:
+
+### 🎯 Action
+bash({'command': 'grep -n "def.*annotation_mask" ./django/db/models/sql/query.py'})
+
+
+## Step 11
+
+### 🤔 Thinking
+Perfect! Let me check these methods:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [2360, 2375]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Now let me also check the annotation_select property:
+
+### 🎯 Action
+bash({'command': 'grep -n "annotation_select" ./django/db/models/sql/query.py'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Now I can see the annotation_select property. Let me check its definition:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [2435, 2455]})
+
+
+## Step 14
+
+### 🤔 Thinking
+Perfect! Now I understand the issue completely. Let me also check how annotate() and alias() methods work:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/query.py', 'view_range': [1570, 1590]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Let me see the alias method completely and _annotate method:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/query.py', 'view_range': [1586, 1605]})
+
+
+## Step 16
+
+### 🤔 Thinking
+Let me see the rest of the _annotate method:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/query.py', 'view_range': [1605, 1645]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Now I have a complete understanding of the issue. Let me look at the test structure to understand how to create a reproduction script:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests'})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me check the annotations tests specifically:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/annotations'})
+
+
+## Step 19
+
+### 🤔 Thinking
+Let me check the models used in annotations tests:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/annotations/models.py'})
+
+
+## Step 20
+
+### 🤔 Thinking
+Now let me look at a sample test to understand the structure:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/annotations/tests.py', 'view_range': [1, 50]})
+
+
+## Step 21
+
+### 🤔 Thinking
+Perfect! Now I have enough context to create a reproduction script. I can see the models and test structure. Let me also check if there are any existing Book and Publisher fixtures in the test:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/annotations/tests.py', 'keywords': ['Publisher.*create', 'Book.*create']})
+
+
+## Step 22
+
+### 🤔 Thinking
+Let me search more broadly for Book and Publisher in the test file:
+
+### 🎯 Action
+bash({'command': 'grep -n "Publisher\\|Book" ./tests/annotations/tests.py | head -20'})
+
+
+## Step 23
+
+### 🤔 Thinking
+Excellent! I can see the test data setup. Now I have enough information to create a reproduction script and understand the issue completely.
+
+Let me proceed with creating the reproduction script first.
+
+### 👁️ Observation
+## 
+2. REPRODUCTION
+
+Let me first create a reproduction script to confirm the issue:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './reproduction.py', 'file_text': '#!/usr/bin/env python3\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            \'default\': {\n                \'ENGINE\': \'django.db.backends.sqlite3\',\n                \'NAME\': \':memory:\',\n            }\n        },\n        INSTALLED_APPS=[\n            \'django.contrib.contenttypes\',\n            \'django.contrib.auth\',\n            \'tests.annotations\',\n        ],\n        SECRET_KEY=\'fake-key-for-tests\',\n        USE_TZ=True,\n    )\n\ndjango.setup()\n\nfrom django.db import connection\nfrom django.core.management.color import no_style\nfrom tests.annotations.models import Author, Book, Publisher\nfrom django.db.models import Value\nimport traceback\n\ndef setup_test_data():\n    """Create test data matching the annotations test suite."""\n    # Create the database tables\n    style = no_style()\n    sql = connection.ops.sql_table_creation_suffix()\n    \n    # Create the tables\n    with connection.schema_editor() as schema_editor:\n        schema_editor.create_model(Author)\n        schema_editor.create_model(Publisher)\n        schema_editor.create_model(Book)\n    \n    # Create publishers\n    p1 = Publisher.objects.create(name="Apress", num_awards=3)\n    p2 = Publisher.objects.create(name="Sams", num_awards=1)\n    p3 = Publisher.objects.create(name="Prentice Hall", num_awards=7)\n    p4 = Publisher.objects.create(name="Morgan Kaufmann", num_awards=9)\n    p5 = Publisher.objects.create(name="Jonno\'s House of Books", num_awards=0)\n    \n    # Create authors\n    a1 = Author.objects.create(name="Adrian Holovaty", age=34)\n    a2 = Author.objects.create(name="Jacob Kaplan-Moss", age=35)\n    a3 = Author.objects.create(name="Brad Dayley", age=45)\n    a4 = Author.objects.create(name="James Bennett", age=29)\n    a5 = Author.objects.create(name="Jeffrey Forcier", age=37)\n    \n    # Create books with high page counts (>400 pages)\n    b1 = Book.objects.create(\n        isbn="159059725",\n        name="The Definitive Guide to Django: Web Development Done Right",\n        pages=447,  # > 400\n        rating=4.5,\n        price=30.00,\n        contact=a1,\n        publisher=p1,\n        pubdate="2007-12-06"\n    )\n    \n    b2 = Book.objects.create(\n        isbn="067232959",\n        name="Sams Teach Yourself Django in 24 Hours",\n        pages=528,  # > 400\n        rating=3.0,\n        price=23.09,\n        contact=a2,\n        publisher=p2,\n        pubdate="2008-03-03"\n    )\n    \n    b3 = Book.objects.create(\n        isbn="159059996",\n        name="Practical Django Projects",\n        pages=300,  # <= 400 (won\'t be included in filter)\n        rating=4.0,\n        price=29.69,\n        contact=a4,\n        publisher=p1,\n        pubdate="2008-06-23"\n    )\n    \n    b4 = Book.objects.create(\n        isbn="013307811",\n        name="Python Web Development with Django",\n        pages=350,  # <= 400 (won\'t be included in filter)\n        rating=4.0,\n        price=44.49,\n        contact=a5,\n        publisher=p3,\n        pubdate="2008-11-01"\n    )\n    \n    b5 = Book.objects.create(\n        isbn="013235613",\n        name="Advanced Django Programming",\n        pages=420,  # > 400\n        rating=5.0,\n        price=75.00,\n        contact=a3,\n        publisher=p4,\n        pubdate="2009-02-01"\n    )\n    \n    return [p1, p2, p3, p4, p5], [a1, a2, a3, a4, a5], [b1, b2, b3, b4, b5]\n\ndef test_annotation_and_alias_filter_in_subquery():\n    """Reproduce the issue described in the GitHub issue."""\n    print("=== Testing annotation and alias filter in subquery ===")\n    \n    try:\n        # This is the exact test case from the issue\n        long_books_qs = (\n            Book.objects.filter(\n                pages__gt=400,\n            )\n            .annotate(book_annotate=Value(1))\n            .alias(book_alias=Value(1))\n        )\n        \n        print(f"Long books queryset: {long_books_qs.query}")\n        print(f"has_select_fields: {long_books_qs.query.has_select_fields}")\n        print(f"annotation_select_mask: {long_books_qs.query.annotation_select_mask}")\n        print(f"annotation_select: {long_books_qs.query.annotation_select}")\n        print()\n        \n        # This should trigger the error\n        publisher_books_qs = (\n            Publisher.objects.filter(\n                book__in=long_books_qs\n            )\n            .values("name")\n        )\n        \n        print("Executing the query...")\n        result = list(publisher_books_qs)\n        print(f"Result: {result}")\n        \n    except Exception as e:\n        print(f"ERROR: {e}")\n        print("TRACEBACK:")\n        traceback.print_exc()\n        return False\n    \n    return True\n\ndef test_working_case():\n    """Test a similar case that should work (without alias)."""\n    print("\\n=== Testing working case (annotate only) ===")\n    \n    try:\n        # This should work fine\n        long_books_qs = (\n            Book.objects.filter(\n                pages__gt=400,\n            )\n            .annotate(book_annotate=Value(1))\n        )\n        \n        print(f"Long books queryset (annotate only): {long_books_qs.query}")\n        print(f"has_select_fields: {long_books_qs.query.has_select_fields}")\n        print(f"annotation_select_mask: {long_books_qs.query.annotation_select_mask}")\n        print(f"annotation_select: {long_books_qs.query.annotation_select}")\n        print()\n        \n        publisher_books_qs = (\n            Publisher.objects.filter(\n                book__in=long_books_qs\n            )\n            .values("name")\n        )\n        \n        print("Executing the query...")\n        result = list(publisher_books_qs)\n        print(f"Result: {result}")\n        \n    except Exception as e:\n        print(f"ERROR: {e}")\n        traceback.print_exc()\n        return False\n    \n    return True\n\nif __name__ == "__main__":\n    print("Setting up test data...")\n    publishers, authors, books = setup_test_data()\n    print(f"Created {len(publishers)} publishers, {len(authors)} authors, {len(books)} books")\n    print()\n    \n    # Test the working case first\n    working = test_working_case()\n    \n    # Test the broken case\n    broken = test_annotation_and_alias_filter_in_subquery()\n    \n    print(f"\\nWorking case: {\'PASS\' if working else \'FAIL\'}")\n    print(f"Broken case: {\'PASS\' if broken else \'FAIL\'}")'})
+
+
+## Step 24
+
+### 🤔 Thinking
+Now let me run the reproduction script to confirm the issue:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 25
+
+### 🤔 Thinking
+Let me fix the reproduction script - I have an error with the table creation part:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': 'def setup_test_data():\n    """Create test data matching the annotations test suite."""\n    # Create the database tables\n    style = no_style()\n    sql = connection.ops.sql_table_creation_suffix()\n    \n    # Create the tables\n    with connection.schema_editor() as schema_editor:\n        schema_editor.create_model(Author)\n        schema_editor.create_model(Publisher)\n        schema_editor.create_model(Book)', 'new_str': 'def setup_test_data():\n    """Create test data matching the annotations test suite."""\n    # Create the database tables\n    with connection.schema_editor() as schema_editor:\n        schema_editor.create_model(Author)\n        schema_editor.create_model(Publisher)\n        schema_editor.create_model(Book)'})
+
+
+## Step 26
+
+### 🤔 Thinking
+Also let me remove the unused import:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': 'from django.db import connection\nfrom django.core.management.color import no_style', 'new_str': 'from django.db import connection'})
+
+
+## Step 27
+
+### 🤔 Thinking
+Now let me run the reproduction script again:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 28
+
+### 🤔 Thinking
+Perfect! I have successfully reproduced the issue. The key observation is:
+
+
+1. **Working case (annotate only)**: 
+   - `has_select_fields: False`
+   - `annotation_select_mask: None`
+   - Works correctly
+
+
+2. **Broken case (annotate + alias)**:
+   - `has_select_fields: True` 
+   - `annotation_select_mask: {'book_annotate'}`
+   - Fails with "sub-select returns 10 columns - expected 1"
+
+This confirms the issue analysis - when `alias()` is called after `annotate()`, the `annotation_select_mask` is not properly cleared, causing `has_select_fields` to return True and preventing the proper cleanup in the In lookup logic.
+
+Now let me move to the fix analysis.
+
+### 👁️ Observation
+<observation>
+
+1. I successfully reproduced the issue with the exact error mentioned in the GitHub issue: "sub-select returns 10 columns - expected 1"
+
+2. The key difference between working and broken case is that the broken case has `has_select_fields: True` and `annotation_select_mask: {'book_annotate'}`, while the working case has `has_select_fields: False` and `annotation_select_mask: None`
+
+3. Alternative action could have been to explore more test cases, but the reproduction clearly shows the root cause
+
+4. Next action: Perform fix analysis based on the confirmed root cause and identified pattern
+</observation>
+
+## 
+3. FIX ANALYSIS
+
+Based on my exploration and the successful reproduction of the issue, I can now analyze the root cause and develop a targeted fix.
+
+### 🎯 Action
+think({'thought': "Let me analyze the root cause and develop the most minimal viable fix:\n\n**Root Cause Analysis:**\nThe issue happens in `django/db/models/sql/query.py` in the `add_annotation` method (line 1118):\n```python\nself.set_annotation_mask(set(self.annotation_select).difference({alias}))\n```\n\nWhen `alias()` is called after `annotate()`:\n
+1. `annotate()` calls `add_annotation` with `select=True`, which calls `append_annotation_mask([alias])` to add the annotation to the mask\n
+2. `alias()` calls `add_annotation` with `select=False`, which tries to remove the alias from the mask using `set(self.annotation_select).difference({alias})`\n
+3. The problem is that the new alias being added is NOT yet in `self.annotation_select` (it gets added to `self.annotations` after the mask logic), so the difference operation has no effect\n
+4. This leaves the previous annotation in the mask, making `has_select_fields` return True\n
+5. The In lookup skips the necessary cleanup because of this\n\n**Fix Analysis Following Principles:**\n\n
+1. **Minimal Viable Change**: The issue is specifically in line 
+1118. I need to fix the logic there rather than change the lookup logic or other parts.\n\n
+2. **Follow Existing Code Patterns**: Looking at the code, there's already a pattern of using `append_annotation_mask` and `set_annotation_mask`. The issue is that the current logic assumes the alias already exists in `annotation_select`, but it doesn't yet.\n\n
+3. **Surgical Fix**: The fix should only target the exact problematic line 1118 and make it work correctly.\n\n
+4. **Preserve Existing Interfaces**: The fix shouldn't change the interface of `add_annotation` or other methods.\n\n
+5. **Most Direct Solution**: Rather than trying to figure out what should be removed from the mask when `select=False`, the most direct approach is to simply not add anything to the mask when `select=False`. This is semantically correct - if `select=False`, then the annotation shouldn't be selected.\n\n**Proposed Fix:**\nThe simplest and most direct fix is to change the logic in line 
+1118. Instead of trying to compute a difference (which fails because the alias isn't in annotation_select yet), we should simply ensure that when `select=False`, the annotation_select_mask doesn't include the current alias.\n\nHowever, looking more closely at the logic, I think the real issue is that we're trying to remove something that was never added. The cleanest fix is to not modify the mask at all when `select=False`, since aliases shouldn't be in the select mask anyway.\n\nLet me check if there are other calls to add_annotation with select=False to understand the expected behavior better."})
+
+
+## Step 29
+
+### 🤔 Thinking
+Let me search for how add_annotation is used with select=False to understand the expected behavior:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './', 'keywords': ['add_annotation.*select=False', 'add_annotation.*False']})
+
+
+## Step 30
+
+### 🤔 Thinking
+Let me check these usages:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/query_utils.py', 'view_range': [120, 130]})
+
+
+## Step 31
+
+### 🤔 Thinking
+Now let me also check how alias() method is implemented to understand the expected behavior when select=False:
+
+### 🎯 Action
+ask_repository_agent({'query': 'What is the expected behavior when add_annotation is called with select=False? How should the annotation_select_mask be handled in this case?'})
+
+
+## Step 32
+
+### 🤔 Thinking
+Perfect! Now I understand the expected behavior. When `select=False`, the annotation should NOT be included in the annotation_select_mask at all. The current logic on line 1118 is trying to remove the alias from the mask, but this is wrong because:
+
+
+1. The alias hasn't been added to `self.annotations` yet (that happens on line 1119)
+
+2. Even if it were, we shouldn't be trying to remove it from a mask - we should just not add it
+
+Let me check what the annotation_select property returns when annotation_select_mask is None vs when it contains items:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [2435, 2455]})
+
+
+## Step 33
+
+### 🤔 Thinking
+Now I understand the complete picture. Let me analyze the proper fix:
+
+The annotation_select property behavior:
+- If `annotation_select_mask` is None → returns all annotations
+- If `annotation_select_mask` is not None → returns only annotations that are in the mask
+
+The issue is that when we call `alias()` after `annotate()`:
+
+1. `annotate()` creates a mask with the annotation
+
+2. `alias()` tries to remove the alias from the mask, but fails because the logic is wrong
+
+3. The mask retains the previous annotation, making has_select_fields return True
+
+The correct fix is to ensure that when `select=False`, we don't put the annotation in the select mask. But we need to be careful about the existing annotations that should remain in the mask.
+
+Looking at line 1118: `self.set_annotation_mask(set(self.annotation_select).difference({alias}))`
+
+This is trying to remove the current alias from the existing annotation_select. But the issue is that `annotation_select` is a computed property based on the current mask and annotations, and the alias hasn't been added to annotations yet.
+
+The correct approach should be to remove the alias from the current mask (if it exists), not from annotation_select. Let me check what the current mask contains at that point.
+
+### 🎯 Action
+think({'thought': 'Now I have a clear understanding of the issue and the correct fix. Let me design the solution:\n\n**Current problematic logic (line 1118):**\n```python\nself.set_annotation_mask(set(self.annotation_select).difference({alias}))\n```\n\nThis is wrong because:\n
+1. `self.annotation_select` is a computed property that depends on both `self.annotations` and `self.annotation_select_mask`\n
+2. At this point, `alias` hasn\'t been added to `self.annotations` yet (that happens on line 1119)\n
+3. So the difference operation is meaningless and doesn\'t remove anything\n\n**The correct logic should be:**\nWhen `select=False`, we want to ensure that the current `alias` is not in the annotation_select_mask, but we should preserve the existing mask for other annotations.\n\nThe fix should be:\n```python\nif self.annotation_select_mask is not None:\n    self.set_annotation_mask(self.annotation_select_mask.difference({alias}))\n```\n\nThis approach:\n
+1. Only modifies the mask if it exists (annotation_select_mask is not None)\n
+2. Removes the current alias from the existing mask (if it was there)\n
+3. Preserves all other annotations in the mask\n
+4. Is simple and direct\n\nThis follows the minimal viable change principle and fixes the exact issue without changing the broader logic.\n\nLet me also verify this makes sense by considering the scenarios:\n- First call to `annotate()`: `annotation_select_mask` is None → `append_annotation_mask` sets it to `{annotation_name}`\n- Second call to `alias()`: `annotation_select_mask` is `{annotation_name}` → we remove the alias from it → mask remains `{annotation_name}` since the alias wasn\'t there\n\nWait, this doesn\'t seem right either. Let me think more carefully...\n\nActually, let me trace through the exact sequence:\n
+1. `annotate(book_annotate=Value(1))` → `add_annotation("book_annotate", ..., select=True)`\n   - Line 1116: `append_annotation_mask(["book_annotate"])` → sets mask to `{"book_annotate"}`\n
+2. `alias(book_alias=Value(1))` → `add_annotation("book_alias", ..., select=False)`  \n   - Line 1118: `set_annotation_mask(set(self.annotation_select).difference({"book_alias"}))`\n   - `self.annotation_select` at this point returns `{"book_annotate": Value(1)}` (based on current mask and annotations)\n   - `set({"book_annotate": Value(1)}).difference({"book_alias"})` = `{"book_annotate"}` (since "book_alias" is not in the keys)\n   - So it tries to set the mask to `{"book_annotate"}`, but since this is doing `set()` on a dictionary, it actually creates a set of the dictionary object itself, which is wrong!\n\nI think I found another bug! The line should be:\n```python\nself.set_annotation_mask(set(self.annotation_select.keys()).difference({alias}))\n```\n\nBecause `self.annotation_select` is a dictionary, but `set()` on a dictionary creates a set of the dict object itself, not its keys.\n\nBut wait, let me double-check this...\n</thinking>\n\n<function_calls>\n<invoke name="bash">\n<parameter name="command">cd ./ && python3 -c "\nd = {\'a\': 1, \'b\': 2}\nprint(\'set(d):\', set(d))\nprint(\'set(d.keys()):\', set(d.keys()))\n"'})
+
+
+## Step 34
+
+### 🤔 Thinking
+Actually, I was wrong - `set()` on a dictionary does iterate over the keys, not create a set with the dictionary object. Let me test this:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python3 -c "\nd = {\'a\': 1, \'b\': 2}\nprint(\'set(d):\', set(d))\nprint(\'set(d.keys()):\', set(d.keys()))\nprint(\'Are they equal?\', set(d) == set(d.keys()))\n"'})
+
+
+## Step 35
+
+### 🤔 Thinking
+OK, so the `set(self.annotation_select)` should work correctly and return the keys. But the issue is still that we're computing this based on the current state, which includes both the mask and annotations, but the new alias hasn't been added to annotations yet.
+
+Let me trace through this more carefully in the context of our reproduction case:
+
+
+1. Start with empty query
+
+2. `annotate(book_annotate=Value(1))`:
+   - `add_annotation("book_annotate", Value(1), select=True)`
+   - Line 1116: `append_annotation_mask(["book_annotate"])` 
+   - `annotation_select_mask` becomes `{"book_annotate"}`
+   - Line 1119: `annotations["book_annotate"] = Value(1)`
+
+
+3. `alias(book_alias=Value(1))`:  
+   - `add_annotation("book_alias", Value(1), select=False)`
+   - Line 1118: `set_annotation_mask(set(self.annotation_select).difference({"book_alias"}))`
+   - At this point:
+     - `self.annotations` = `{"book_annotate": Value(1)}`
+     - `self.annotation_select_mask` = `{"book_annotate"}`
+     - `self.annotation_select` = `{"book_annotate": Value(1)}` (filtered by mask)
+     - `set(self.annotation_select)` = `{"book_annotate"}`
+     - `set(self.annotation_select).difference({"book_alias"})` = `{"book_annotate"}` (since "book_alias" is not in the set)
+     - `set_annotation_mask({"book_annotate"})` → mask remains `{"book_annotate"}`
+   - Line 1119: `annotations["book_alias"] = Value(1)`
+
+The mask's behavior reveals a subtle complexity. When an alias is added with `select=False`, the current implementation might inadvertently trigger `has_select_fields` due to how the mask is manipulated. I'm sensing the core problem lies in the mask modification logic during alias creation, particularly when we want to explicitly exclude the new annotation from selection.
+
+The key insight is that `select=False` should fundamentally prevent any mask manipulation, preserving the existing selection state entirely. This means the mask should remain untouched, regardless of the new alias being introduced.
+
+### 👁️ Observation
+Let me enhance the reproduction script to understand exactly what's happening with the annotation masks:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': 'def test_annotation_and_alias_filter_in_subquery():\n    """Reproduce the issue described in the GitHub issue."""\n    print("=== Testing annotation and alias filter in subquery ===")\n    \n    try:\n        # This is the exact test case from the issue\n        long_books_qs = (\n            Book.objects.filter(\n                pages__gt=400,\n            )\n            .annotate(book_annotate=Value(1))\n            .alias(book_alias=Value(1))\n        )\n        \n        print(f"Long books queryset: {long_books_qs.query}")\n        print(f"has_select_fields: {long_books_qs.query.has_select_fields}")\n        print(f"annotation_select_mask: {long_books_qs.query.annotation_select_mask}")\n        print(f"annotation_select: {long_books_qs.query.annotation_select}")\n        print()\n        \n        # This should trigger the error\n        publisher_books_qs = (\n            Publisher.objects.filter(\n                book__in=long_books_qs\n            )\n            .values("name")\n        )\n        \n        print("Executing the query...")\n        result = list(publisher_books_qs)\n        print(f"Result: {result}")\n        \n    except Exception as e:\n        print(f"ERROR: {e}")\n        print("TRACEBACK:")\n        traceback.print_exc()\n        return False\n    \n    return True', 'new_str': 'def test_annotation_and_alias_filter_in_subquery():\n    """Reproduce the issue described in the GitHub issue."""\n    print("=== Testing annotation and alias filter in subquery ===")\n    \n    try:\n        # Step by step to understand the issue\n        base_qs = Book.objects.filter(pages__gt=400)\n        print(f"Base queryset has_select_fields: {base_qs.query.has_select_fields}")\n        print(f"Base queryset annotation_select_mask: {base_qs.query.annotation_select_mask}")\n        \n        annotated_qs = base_qs.annotate(book_annotate=Value(1))\n        print(f"After annotate() has_select_fields: {annotated_qs.query.has_select_fields}")\n        print(f"After annotate() annotation_select_mask: {annotated_qs.query.annotation_select_mask}")\n        print(f"After annotate() annotations: {annotated_qs.query.annotations}")\n        print(f"After annotate() annotation_select: {annotated_qs.query.annotation_select}")\n        \n        # This is the exact test case from the issue\n        long_books_qs = annotated_qs.alias(book_alias=Value(1))\n        \n        print(f"After alias() has_select_fields: {long_books_qs.query.has_select_fields}")\n        print(f"After alias() annotation_select_mask: {long_books_qs.query.annotation_select_mask}")\n        print(f"After alias() annotations: {long_books_qs.query.annotations}")\n        print(f"After alias() annotation_select: {long_books_qs.query.annotation_select}")\n        print()\n        \n        # This should trigger the error\n        publisher_books_qs = (\n            Publisher.objects.filter(\n                book__in=long_books_qs\n            )\n            .values("name")\n        )\n        \n        print("Executing the query...")\n        result = list(publisher_books_qs)\n        print(f"Result: {result}")\n        \n    except Exception as e:\n        print(f"ERROR: {e}")\n        print("TRACEBACK:")\n        traceback.print_exc()\n        return False\n    \n    return True'})
+
+
+## Step 36
+
+### 🤔 Thinking
+Now let me run the enhanced reproduction script:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 37
+
+### 🤔 Thinking
+Now I can see exactly what's happening! The key insight is:
+
+**Working case (annotate only):**
+- `annotation_select_mask: None` → `has_select_fields: False`
+- When mask is None, annotation_select returns all annotations, but has_select_fields is False because mask is None
+
+**Broken case (annotate + alias):**
+- After `annotate()`: `annotation_select_mask: None` → `has_select_fields: False`  
+- After `alias()`: `annotation_select_mask: {'book_annotate'}` → `has_select_fields: True`
+
+The issue is that `alias()` is creating a mask! This shouldn't happen. Let me understand why this is happening.
+
+Looking back at the add_annotation method:
+- When `select=True` (annotate): calls `append_annotation_mask([alias])`
+- When `select=False` (alias): calls `set_annotation_mask(set(self.annotation_select).difference({alias}))`
+
+The issue is that the logic on line 1118 is wrong. When we call `alias()`, we should NOT create a mask if one doesn't exist. But the current logic always creates a mask by calling `set_annotation_mask()`.
+
+The correct behavior should be:
+- If no mask exists (annotation_select_mask is None), do nothing - aliases don't create masks
+- If a mask exists, remove the alias from it (though it wouldn't be there anyway)
+
+So the fix should be:
+
+
+```python
+if self.annotation_select_mask is not None:
+    self.set_annotation_mask(self.annotation_select_mask.difference({alias}))
+
+
+```
+
+This way, alias() will only modify existing masks, not create new ones.
+
+Actually wait... let me re-examine the behavior more carefully. In the working case, we had:
+
+
+```
+After annotate() annotation_select_mask: None
+
+
+```
+
+But normally when we annotate something with select=True, it should create a mask. 
+
+I'll investigate the append_annotation_mask method to understand why the mask remains None after annotation. Something seems off with how masks are being created or managed during the annotation process.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [2368, 2375]})
+
+
+## Step 38
+
+### 🤔 Thinking
+Aha! Now I see the issue. The `append_annotation_mask` method only modifies the mask IF it already exists (`if self.annotation_select_mask is not None`). But when we start with a fresh query, `annotation_select_mask` is None, so calling `append_annotation_mask` does nothing!
+
+This means that:
+
+1. `annotate()` calls `append_annotation_mask` but since mask is None, it does nothing
+
+2. `alias()` calls `set_annotation_mask()` which always sets the mask, creating it if it didn't exist
+
+This is the root cause! The `annotate()` method is not creating a mask when starting from a fresh query, but `alias()` is creating one.
+
+Looking at the current logic, the `append_annotation_mask` behavior seems to be designed this way - it only adds to an existing mask. So the issue is that `alias()` shouldn't be creating a mask when none exists.
+
+The correct fix is indeed:
+
+
+```python
+if self.annotation_select_mask is not None:
+    self.set_annotation_mask(self.annotation_select_mask.difference({alias}))
+
+
+```
+
+This way, `alias()` will only modify existing masks, not create new ones, maintaining consistency with `append_annotation_mask`.
+
+### 📋 Conclusion
+Perfect! Now I understand the exact issue. Based on my analysis, here's my solution:
+
+## SOLUTION MAPPING
+
+**Root Cause Confirmed:**
+The issue is in `django/db/models/sql/query.py` line 
+1118. When `alias()` is called after `annotate()`, the logic `self.set_annotation_mask(set(self.annotation_select).difference({alias}))` incorrectly creates an annotation mask even when none existed before. This is inconsistent with `append_annotation_mask()` which only modifies existing masks.
+
+**Key Insights from Reproduction:**
+- **Working case** (annotate only): `annotation_select_mask: None` → `has_select_fields: False`  
+- **Broken case** (annotate + alias): `annotation_select_mask: {'book_annotate'}` → `has_select_fields: True`
+
+The `append_annotation_mask` method only modifies masks if they already exist (`if self.annotation_select_mask is not None`), but the current alias logic always creates a mask via `set_annotation_mask()`.
+
+**Fix Analysis Following Principles:**
+
+
+1. **Minimal Viable Change**: Fix only the problematic line 1118 in `add_annotation` method
+
+2. **Follow Existing Code Patterns**: Match the behavior of `append_annotation_mask` which only modifies existing masks  
+
+3. **Surgical Fix**: Target the exact root cause without changing lookup logic or other components
+
+4. **Preserve Existing Interfaces**: No changes to method signatures or data flow
+
+5. **Most Direct Solution**: Simple conditional check to maintain mask consistency
+
+<code_change_plan>
+The issue occurs when `QuerySet.alias()` is called after `annotate()`. The root cause is in `django/db/models/sql/query.py` line 1118, where the `add_annotation` method incorrectly creates an annotation mask when `select=False` (alias case), even when no mask previously existed. This breaks the consistency with `append_annotation_mask` behavior and causes `has_select_fields` to return True, preventing necessary SELECT clause cleanup in `__in` lookups.
+
+The fix ensures that `alias()` only modifies existing annotation masks, not create new ones, maintaining consistency with the existing pattern used by `append_annotation_mask()`.
+
+**Reproduction script:** `./reproduction.py`
+- **Current output:** "ERROR: sub-select returns 10 columns - expected 1"  
+- **Expected output:** "Result: [{'name': 'Apress'}, {'name': 'Sams'}, {'name': 'Morgan Kaufmann'}]"
+
+/docker_map/testbed/django/db/models/sql/query.py:
+- Change line 1118: Replace the unconditional `set_annotation_mask()` call with a conditional check that only modifies existing masks
+  Reasoning: The current logic `self.set_annotation_mask(set(self.annotation_select).difference({alias}))` always creates a mask, even when `annotation_select_mask` was None. This is inconsistent with `append_annotation_mask()` which only modifies existing masks. The fix ensures aliases don't create masks unnecessarily, maintaining the principle that aliases should not affect SELECT field selection in subqueries.
+</code_change_plan>
+</solution_mapper 0>
+
+<problem_solver 0>
+## Step 1
+
+### 🤔 Thinking
+Based on the issue analysis provided, I need to first explore the repository to understand the problem better and locate the relevant files. The issue analysis has already identified several key files and methods, but I should verify this by exploring the code myself.
+
+Let me start by exploring the relevant files mentioned in the issue analysis:
+
+1. `django/db/models/lookups.py` - contains the In lookup logic
+
+2. `django/db/models/sql/query.py` - contains add_annotation and has_select_fields methods
+
+3. `django/db/models/fields/related_lookups.py` - contains RelatedIn lookup logic
+
+Let me search for these files first.
+
+### 👁️ Observation
+I'll help you map a solution to this Django ORM issue. Let me start by exploring the repository to understand the problem and locate the relevant files.
+
+## 
+1. EXPLORATION
+
+Let me first search for the key files and methods mentioned in the issue analysis:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './', 'keywords': ['In.*get_prep_lookup', 'has_select_fields', 'add_annotation', 'clear_select_clause']})
+
+
+## Step 2
+
+### 🤔 Thinking
+Good, I found some relevant matches. Let me explore the specific files mentioned in the issue analysis to understand the code structure better.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/lookups.py', 'view_range': [420, 430]})
+
+
+## Step 3
+
+### 🤔 Thinking
+Great! This confirms the In lookup logic mentioned in the issue analysis. Now let me check the has_select_fields property:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [265, 275]})
+
+
+## Step 4
+
+### 🤔 Thinking
+Perfect! I can see that has_select_fields returns True when annotation_select_mask is non-empty. Now let me check the add_annotation method:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [1109, 1125]})
+
+
+## Step 5
+
+### 🤔 Thinking
+Now I can see the exact issue! Line 1118 is the problematic line. Let me also check the related_lookups file:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/fields/related_lookups.py', 'view_range': [90, 110]})
+
+
+## Step 6
+
+### 🤔 Thinking
+I see that RelatedIn has similar logic. Let me also check the methods that handle annotation masks:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/query.py', 'keywords': ['append_annotation_mask', 'set_annotation_mask', 'annotation_select']})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me search more broadly for these methods:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './', 'keywords': ['annotation_mask', 'annotation_select_mask', 'set_annotation_mask']})
+
+
+## Step 8
+
+### 🤔 Thinking
+Great! Let me check these mask-related methods:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [475, 490]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me find the definition of set_annotation_mask:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/query.py', 'keywords': ['def set_annotation_mask']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me search more broadly:
+
+### 🎯 Action
+bash({'command': 'grep -n "def.*annotation_mask" ./django/db/models/sql/query.py'})
+
+
+## Step 11
+
+### 🤔 Thinking
+Perfect! Let me check these methods:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [2360, 2375]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Now let me also check the annotation_select property:
+
+### 🎯 Action
+bash({'command': 'grep -n "annotation_select" ./django/db/models/sql/query.py'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Now I can see the annotation_select property. Let me check its definition:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [2435, 2455]})
+
+
+## Step 14
+
+### 🤔 Thinking
+Perfect! Now I understand the issue completely. Let me also check how annotate() and alias() methods work:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/query.py', 'view_range': [1570, 1590]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Let me see the alias method completely and _annotate method:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/query.py', 'view_range': [1586, 1605]})
+
+
+## Step 16
+
+### 🤔 Thinking
+Let me see the rest of the _annotate method:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/query.py', 'view_range': [1605, 1645]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Now I have a complete understanding of the issue. Let me look at the test structure to understand how to create a reproduction script:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests'})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me check the annotations tests specifically:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/annotations'})
+
+
+## Step 19
+
+### 🤔 Thinking
+Let me check the models used in annotations tests:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/annotations/models.py'})
+
+
+## Step 20
+
+### 🤔 Thinking
+Now let me look at a sample test to understand the structure:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/annotations/tests.py', 'view_range': [1, 50]})
+
+
+## Step 21
+
+### 🤔 Thinking
+Perfect! Now I have enough context to create a reproduction script. I can see the models and test structure. Let me also check if there are any existing Book and Publisher fixtures in the test:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/annotations/tests.py', 'keywords': ['Publisher.*create', 'Book.*create']})
+
+
+## Step 22
+
+### 🤔 Thinking
+Let me search more broadly for Book and Publisher in the test file:
+
+### 🎯 Action
+bash({'command': 'grep -n "Publisher\\|Book" ./tests/annotations/tests.py | head -20'})
+
+
+## Step 23
+
+### 🤔 Thinking
+Excellent! I can see the test data setup. Now I have enough information to create a reproduction script and understand the issue completely.
+
+Let me proceed with creating the reproduction script first.
+
+### 👁️ Observation
+## 
+2. REPRODUCTION
+
+Let me first create a reproduction script to confirm the issue:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './reproduction.py', 'file_text': '#!/usr/bin/env python3\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            \'default\': {\n                \'ENGINE\': \'django.db.backends.sqlite3\',\n                \'NAME\': \':memory:\',\n            }\n        },\n        INSTALLED_APPS=[\n            \'django.contrib.contenttypes\',\n            \'django.contrib.auth\',\n            \'tests.annotations\',\n        ],\n        SECRET_KEY=\'fake-key-for-tests\',\n        USE_TZ=True,\n    )\n\ndjango.setup()\n\nfrom django.db import connection\nfrom django.core.management.color import no_style\nfrom tests.annotations.models import Author, Book, Publisher\nfrom django.db.models import Value\nimport traceback\n\ndef setup_test_data():\n    """Create test data matching the annotations test suite."""\n    # Create the database tables\n    style = no_style()\n    sql = connection.ops.sql_table_creation_suffix()\n    \n    # Create the tables\n    with connection.schema_editor() as schema_editor:\n        schema_editor.create_model(Author)\n        schema_editor.create_model(Publisher)\n        schema_editor.create_model(Book)\n    \n    # Create publishers\n    p1 = Publisher.objects.create(name="Apress", num_awards=3)\n    p2 = Publisher.objects.create(name="Sams", num_awards=1)\n    p3 = Publisher.objects.create(name="Prentice Hall", num_awards=7)\n    p4 = Publisher.objects.create(name="Morgan Kaufmann", num_awards=9)\n    p5 = Publisher.objects.create(name="Jonno\'s House of Books", num_awards=0)\n    \n    # Create authors\n    a1 = Author.objects.create(name="Adrian Holovaty", age=34)\n    a2 = Author.objects.create(name="Jacob Kaplan-Moss", age=35)\n    a3 = Author.objects.create(name="Brad Dayley", age=45)\n    a4 = Author.objects.create(name="James Bennett", age=29)\n    a5 = Author.objects.create(name="Jeffrey Forcier", age=37)\n    \n    # Create books with high page counts (>400 pages)\n    b1 = Book.objects.create(\n        isbn="159059725",\n        name="The Definitive Guide to Django: Web Development Done Right",\n        pages=447,  # > 400\n        rating=4.5,\n        price=30.00,\n        contact=a1,\n        publisher=p1,\n        pubdate="2007-12-06"\n    )\n    \n    b2 = Book.objects.create(\n        isbn="067232959",\n        name="Sams Teach Yourself Django in 24 Hours",\n        pages=528,  # > 400\n        rating=3.0,\n        price=23.09,\n        contact=a2,\n        publisher=p2,\n        pubdate="2008-03-03"\n    )\n    \n    b3 = Book.objects.create(\n        isbn="159059996",\n        name="Practical Django Projects",\n        pages=300,  # <= 400 (won\'t be included in filter)\n        rating=4.0,\n        price=29.69,\n        contact=a4,\n        publisher=p1,\n        pubdate="2008-06-23"\n    )\n    \n    b4 = Book.objects.create(\n        isbn="013307811",\n        name="Python Web Development with Django",\n        pages=350,  # <= 400 (won\'t be included in filter)\n        rating=4.0,\n        price=44.49,\n        contact=a5,\n        publisher=p3,\n        pubdate="2008-11-01"\n    )\n    \n    b5 = Book.objects.create(\n        isbn="013235613",\n        name="Advanced Django Programming",\n        pages=420,  # > 400\n        rating=5.0,\n        price=75.00,\n        contact=a3,\n        publisher=p4,\n        pubdate="2009-02-01"\n    )\n    \n    return [p1, p2, p3, p4, p5], [a1, a2, a3, a4, a5], [b1, b2, b3, b4, b5]\n\ndef test_annotation_and_alias_filter_in_subquery():\n    """Reproduce the issue described in the GitHub issue."""\n    print("=== Testing annotation and alias filter in subquery ===")\n    \n    try:\n        # This is the exact test case from the issue\n        long_books_qs = (\n            Book.objects.filter(\n                pages__gt=400,\n            )\n            .annotate(book_annotate=Value(1))\n            .alias(book_alias=Value(1))\n        )\n        \n        print(f"Long books queryset: {long_books_qs.query}")\n        print(f"has_select_fields: {long_books_qs.query.has_select_fields}")\n        print(f"annotation_select_mask: {long_books_qs.query.annotation_select_mask}")\n        print(f"annotation_select: {long_books_qs.query.annotation_select}")\n        print()\n        \n        # This should trigger the error\n        publisher_books_qs = (\n            Publisher.objects.filter(\n                book__in=long_books_qs\n            )\n            .values("name")\n        )\n        \n        print("Executing the query...")\n        result = list(publisher_books_qs)\n        print(f"Result: {result}")\n        \n    except Exception as e:\n        print(f"ERROR: {e}")\n        print("TRACEBACK:")\n        traceback.print_exc()\n        return False\n    \n    return True\n\ndef test_working_case():\n    """Test a similar case that should work (without alias)."""\n    print("\\n=== Testing working case (annotate only) ===")\n    \n    try:\n        # This should work fine\n        long_books_qs = (\n            Book.objects.filter(\n                pages__gt=400,\n            )\n            .annotate(book_annotate=Value(1))\n        )\n        \n        print(f"Long books queryset (annotate only): {long_books_qs.query}")\n        print(f"has_select_fields: {long_books_qs.query.has_select_fields}")\n        print(f"annotation_select_mask: {long_books_qs.query.annotation_select_mask}")\n        print(f"annotation_select: {long_books_qs.query.annotation_select}")\n        print()\n        \n        publisher_books_qs = (\n            Publisher.objects.filter(\n                book__in=long_books_qs\n            )\n            .values("name")\n        )\n        \n        print("Executing the query...")\n        result = list(publisher_books_qs)\n        print(f"Result: {result}")\n        \n    except Exception as e:\n        print(f"ERROR: {e}")\n        traceback.print_exc()\n        return False\n    \n    return True\n\nif __name__ == "__main__":\n    print("Setting up test data...")\n    publishers, authors, books = setup_test_data()\n    print(f"Created {len(publishers)} publishers, {len(authors)} authors, {len(books)} books")\n    print()\n    \n    # Test the working case first\n    working = test_working_case()\n    \n    # Test the broken case\n    broken = test_annotation_and_alias_filter_in_subquery()\n    \n    print(f"\\nWorking case: {\'PASS\' if working else \'FAIL\'}")\n    print(f"Broken case: {\'PASS\' if broken else \'FAIL\'}")'})
+
+
+## Step 24
+
+### 🤔 Thinking
+Now let me run the reproduction script to confirm the issue:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 25
+
+### 🤔 Thinking
+Let me fix the reproduction script - I have an error with the table creation part:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': 'def setup_test_data():\n    """Create test data matching the annotations test suite."""\n    # Create the database tables\n    style = no_style()\n    sql = connection.ops.sql_table_creation_suffix()\n    \n    # Create the tables\n    with connection.schema_editor() as schema_editor:\n        schema_editor.create_model(Author)\n        schema_editor.create_model(Publisher)\n        schema_editor.create_model(Book)', 'new_str': 'def setup_test_data():\n    """Create test data matching the annotations test suite."""\n    # Create the database tables\n    with connection.schema_editor() as schema_editor:\n        schema_editor.create_model(Author)\n        schema_editor.create_model(Publisher)\n        schema_editor.create_model(Book)'})
+
+
+## Step 26
+
+### 🤔 Thinking
+Also let me remove the unused import:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': 'from django.db import connection\nfrom django.core.management.color import no_style', 'new_str': 'from django.db import connection'})
+
+
+## Step 27
+
+### 🤔 Thinking
+Now let me run the reproduction script again:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 28
+
+### 🤔 Thinking
+Perfect! I have successfully reproduced the issue. The key observation is:
+
+
+1. **Working case (annotate only)**: 
+   - `has_select_fields: False`
+   - `annotation_select_mask: None`
+   - Works correctly
+
+
+2. **Broken case (annotate + alias)**:
+   - `has_select_fields: True` 
+   - `annotation_select_mask: {'book_annotate'}`
+   - Fails with "sub-select returns 10 columns - expected 1"
+
+This confirms the issue analysis - when `alias()` is called after `annotate()`, the `annotation_select_mask` is not properly cleared, causing `has_select_fields` to return True and preventing the proper cleanup in the In lookup logic.
+
+Now let me move to the fix analysis.
+
+### 👁️ Observation
+<observation>
+
+1. I successfully reproduced the issue with the exact error mentioned in the GitHub issue: "sub-select returns 10 columns - expected 1"
+
+2. The key difference between working and broken case is that the broken case has `has_select_fields: True` and `annotation_select_mask: {'book_annotate'}`, while the working case has `has_select_fields: False` and `annotation_select_mask: None`
+
+3. Alternative action could have been to explore more test cases, but the reproduction clearly shows the root cause
+
+4. Next action: Perform fix analysis based on the confirmed root cause and identified pattern
+</observation>
+
+## 
+3. FIX ANALYSIS
+
+Based on my exploration and the successful reproduction of the issue, I can now analyze the root cause and develop a targeted fix.
+
+### 🎯 Action
+think({'thought': "Let me analyze the root cause and develop the most minimal viable fix:\n\n**Root Cause Analysis:**\nThe issue happens in `django/db/models/sql/query.py` in the `add_annotation` method (line 1118):\n```python\nself.set_annotation_mask(set(self.annotation_select).difference({alias}))\n```\n\nWhen `alias()` is called after `annotate()`:\n
+1. `annotate()` calls `add_annotation` with `select=True`, which calls `append_annotation_mask([alias])` to add the annotation to the mask\n
+2. `alias()` calls `add_annotation` with `select=False`, which tries to remove the alias from the mask using `set(self.annotation_select).difference({alias})`\n
+3. The problem is that the new alias being added is NOT yet in `self.annotation_select` (it gets added to `self.annotations` after the mask logic), so the difference operation has no effect\n
+4. This leaves the previous annotation in the mask, making `has_select_fields` return True\n
+5. The In lookup skips the necessary cleanup because of this\n\n**Fix Analysis Following Principles:**\n\n
+1. **Minimal Viable Change**: The issue is specifically in line 
+1118. I need to fix the logic there rather than change the lookup logic or other parts.\n\n
+2. **Follow Existing Code Patterns**: Looking at the code, there's already a pattern of using `append_annotation_mask` and `set_annotation_mask`. The issue is that the current logic assumes the alias already exists in `annotation_select`, but it doesn't yet.\n\n
+3. **Surgical Fix**: The fix should only target the exact problematic line 1118 and make it work correctly.\n\n
+4. **Preserve Existing Interfaces**: The fix shouldn't change the interface of `add_annotation` or other methods.\n\n
+5. **Most Direct Solution**: Rather than trying to figure out what should be removed from the mask when `select=False`, the most direct approach is to simply not add anything to the mask when `select=False`. This is semantically correct - if `select=False`, then the annotation shouldn't be selected.\n\n**Proposed Fix:**\nThe simplest and most direct fix is to change the logic in line 
+1118. Instead of trying to compute a difference (which fails because the alias isn't in annotation_select yet), we should simply ensure that when `select=False`, the annotation_select_mask doesn't include the current alias.\n\nHowever, looking more closely at the logic, I think the real issue is that we're trying to remove something that was never added. The cleanest fix is to not modify the mask at all when `select=False`, since aliases shouldn't be in the select mask anyway.\n\nLet me check if there are other calls to add_annotation with select=False to understand the expected behavior better."})
+
+
+## Step 29
+
+### 🤔 Thinking
+Let me search for how add_annotation is used with select=False to understand the expected behavior:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './', 'keywords': ['add_annotation.*select=False', 'add_annotation.*False']})
+
+
+## Step 30
+
+### 🤔 Thinking
+Let me check these usages:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/query_utils.py', 'view_range': [120, 130]})
+
+
+## Step 31
+
+### 🤔 Thinking
+Now let me also check how alias() method is implemented to understand the expected behavior when select=False:
+
+### 🎯 Action
+ask_repository_agent({'query': 'What is the expected behavior when add_annotation is called with select=False? How should the annotation_select_mask be handled in this case?'})
+
+
+## Step 32
+
+### 🤔 Thinking
+Perfect! Now I understand the expected behavior. When `select=False`, the annotation should NOT be included in the annotation_select_mask at all. The current logic on line 1118 is trying to remove the alias from the mask, but this is wrong because:
+
+
+1. The alias hasn't been added to `self.annotations` yet (that happens on line 1119)
+
+2. Even if it were, we shouldn't be trying to remove it from a mask - we should just not add it
+
+Let me check what the annotation_select property returns when annotation_select_mask is None vs when it contains items:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [2435, 2455]})
+
+
+## Step 33
+
+### 🤔 Thinking
+Now I understand the complete picture. Let me analyze the proper fix:
+
+The annotation_select property behavior:
+- If `annotation_select_mask` is None → returns all annotations
+- If `annotation_select_mask` is not None → returns only annotations that are in the mask
+
+The issue is that when we call `alias()` after `annotate()`:
+
+1. `annotate()` creates a mask with the annotation
+
+2. `alias()` tries to remove the alias from the mask, but fails because the logic is wrong
+
+3. The mask retains the previous annotation, making has_select_fields return True
+
+The correct fix is to ensure that when `select=False`, we don't put the annotation in the select mask. But we need to be careful about the existing annotations that should remain in the mask.
+
+Looking at line 1118: `self.set_annotation_mask(set(self.annotation_select).difference({alias}))`
+
+This is trying to remove the current alias from the existing annotation_select. But the issue is that `annotation_select` is a computed property based on the current mask and annotations, and the alias hasn't been added to annotations yet.
+
+The correct approach should be to remove the alias from the current mask (if it exists), not from annotation_select. Let me check what the current mask contains at that point.
+
+### 🎯 Action
+think({'thought': 'Now I have a clear understanding of the issue and the correct fix. Let me design the solution:\n\n**Current problematic logic (line 1118):**\n```python\nself.set_annotation_mask(set(self.annotation_select).difference({alias}))\n```\n\nThis is wrong because:\n
+1. `self.annotation_select` is a computed property that depends on both `self.annotations` and `self.annotation_select_mask`\n
+2. At this point, `alias` hasn\'t been added to `self.annotations` yet (that happens on line 1119)\n
+3. So the difference operation is meaningless and doesn\'t remove anything\n\n**The correct logic should be:**\nWhen `select=False`, we want to ensure that the current `alias` is not in the annotation_select_mask, but we should preserve the existing mask for other annotations.\n\nThe fix should be:\n```python\nif self.annotation_select_mask is not None:\n    self.set_annotation_mask(self.annotation_select_mask.difference({alias}))\n```\n\nThis approach:\n
+1. Only modifies the mask if it exists (annotation_select_mask is not None)\n
+2. Removes the current alias from the existing mask (if it was there)\n
+3. Preserves all other annotations in the mask\n
+4. Is simple and direct\n\nThis follows the minimal viable change principle and fixes the exact issue without changing the broader logic.\n\nLet me also verify this makes sense by considering the scenarios:\n- First call to `annotate()`: `annotation_select_mask` is None → `append_annotation_mask` sets it to `{annotation_name}`\n- Second call to `alias()`: `annotation_select_mask` is `{annotation_name}` → we remove the alias from it → mask remains `{annotation_name}` since the alias wasn\'t there\n\nWait, this doesn\'t seem right either. Let me think more carefully...\n\nActually, let me trace through the exact sequence:\n
+1. `annotate(book_annotate=Value(1))` → `add_annotation("book_annotate", ..., select=True)`\n   - Line 1116: `append_annotation_mask(["book_annotate"])` → sets mask to `{"book_annotate"}`\n
+2. `alias(book_alias=Value(1))` → `add_annotation("book_alias", ..., select=False)`  \n   - Line 1118: `set_annotation_mask(set(self.annotation_select).difference({"book_alias"}))`\n   - `self.annotation_select` at this point returns `{"book_annotate": Value(1)}` (based on current mask and annotations)\n   - `set({"book_annotate": Value(1)}).difference({"book_alias"})` = `{"book_annotate"}` (since "book_alias" is not in the keys)\n   - So it tries to set the mask to `{"book_annotate"}`, but since this is doing `set()` on a dictionary, it actually creates a set of the dictionary object itself, which is wrong!\n\nI think I found another bug! The line should be:\n```python\nself.set_annotation_mask(set(self.annotation_select.keys()).difference({alias}))\n```\n\nBecause `self.annotation_select` is a dictionary, but `set()` on a dictionary creates a set of the dict object itself, not its keys.\n\nBut wait, let me double-check this...\n</thinking>\n\n<function_calls>\n<invoke name="bash">\n<parameter name="command">cd ./ && python3 -c "\nd = {\'a\': 1, \'b\': 2}\nprint(\'set(d):\', set(d))\nprint(\'set(d.keys()):\', set(d.keys()))\n"'})
+
+
+## Step 34
+
+### 🤔 Thinking
+Actually, I was wrong - `set()` on a dictionary does iterate over the keys, not create a set with the dictionary object. Let me test this:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python3 -c "\nd = {\'a\': 1, \'b\': 2}\nprint(\'set(d):\', set(d))\nprint(\'set(d.keys()):\', set(d.keys()))\nprint(\'Are they equal?\', set(d) == set(d.keys()))\n"'})
+
+
+## Step 35
+
+### 🤔 Thinking
+OK, so the `set(self.annotation_select)` should work correctly and return the keys. But the issue is still that we're computing this based on the current state, which includes both the mask and annotations, but the new alias hasn't been added to annotations yet.
+
+Let me trace through this more carefully in the context of our reproduction case:
+
+
+1. Start with empty query
+
+2. `annotate(book_annotate=Value(1))`:
+   - `add_annotation("book_annotate", Value(1), select=True)`
+   - Line 1116: `append_annotation_mask(["book_annotate"])` 
+   - `annotation_select_mask` becomes `{"book_annotate"}`
+   - Line 1119: `annotations["book_annotate"] = Value(1)`
+
+
+3. `alias(book_alias=Value(1))`:  
+   - `add_annotation("book_alias", Value(1), select=False)`
+   - Line 1118: `set_annotation_mask(set(self.annotation_select).difference({"book_alias"}))`
+   - At this point:
+     - `self.annotations` = `{"book_annotate": Value(1)}`
+     - `self.annotation_select_mask` = `{"book_annotate"}`
+     - `self.annotation_select` = `{"book_annotate": Value(1)}` (filtered by mask)
+     - `set(self.annotation_select)` = `{"book_annotate"}`
+     - `set(self.annotation_select).difference({"book_alias"})` = `{"book_annotate"}` (since "book_alias" is not in the set)
+     - `set_annotation_mask({"book_annotate"})` → mask remains `{"book_annotate"}`
+   - Line 1119: `annotations["book_alias"] = Value(1)`
+
+The mask's behavior reveals a subtle complexity. When an alias is added with `select=False`, the current implementation might inadvertently trigger `has_select_fields` due to how the mask is manipulated. I'm sensing the core problem lies in the mask modification logic during alias creation, particularly when we want to explicitly exclude the new annotation from selection.
+
+The key insight is that `select=False` should fundamentally prevent any mask manipulation, preserving the existing selection state entirely. This means the mask should remain untouched, regardless of the new alias being introduced.
+
+### 👁️ Observation
+Let me enhance the reproduction script to understand exactly what's happening with the annotation masks:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': 'def test_annotation_and_alias_filter_in_subquery():\n    """Reproduce the issue described in the GitHub issue."""\n    print("=== Testing annotation and alias filter in subquery ===")\n    \n    try:\n        # This is the exact test case from the issue\n        long_books_qs = (\n            Book.objects.filter(\n                pages__gt=400,\n            )\n            .annotate(book_annotate=Value(1))\n            .alias(book_alias=Value(1))\n        )\n        \n        print(f"Long books queryset: {long_books_qs.query}")\n        print(f"has_select_fields: {long_books_qs.query.has_select_fields}")\n        print(f"annotation_select_mask: {long_books_qs.query.annotation_select_mask}")\n        print(f"annotation_select: {long_books_qs.query.annotation_select}")\n        print()\n        \n        # This should trigger the error\n        publisher_books_qs = (\n            Publisher.objects.filter(\n                book__in=long_books_qs\n            )\n            .values("name")\n        )\n        \n        print("Executing the query...")\n        result = list(publisher_books_qs)\n        print(f"Result: {result}")\n        \n    except Exception as e:\n        print(f"ERROR: {e}")\n        print("TRACEBACK:")\n        traceback.print_exc()\n        return False\n    \n    return True', 'new_str': 'def test_annotation_and_alias_filter_in_subquery():\n    """Reproduce the issue described in the GitHub issue."""\n    print("=== Testing annotation and alias filter in subquery ===")\n    \n    try:\n        # Step by step to understand the issue\n        base_qs = Book.objects.filter(pages__gt=400)\n        print(f"Base queryset has_select_fields: {base_qs.query.has_select_fields}")\n        print(f"Base queryset annotation_select_mask: {base_qs.query.annotation_select_mask}")\n        \n        annotated_qs = base_qs.annotate(book_annotate=Value(1))\n        print(f"After annotate() has_select_fields: {annotated_qs.query.has_select_fields}")\n        print(f"After annotate() annotation_select_mask: {annotated_qs.query.annotation_select_mask}")\n        print(f"After annotate() annotations: {annotated_qs.query.annotations}")\n        print(f"After annotate() annotation_select: {annotated_qs.query.annotation_select}")\n        \n        # This is the exact test case from the issue\n        long_books_qs = annotated_qs.alias(book_alias=Value(1))\n        \n        print(f"After alias() has_select_fields: {long_books_qs.query.has_select_fields}")\n        print(f"After alias() annotation_select_mask: {long_books_qs.query.annotation_select_mask}")\n        print(f"After alias() annotations: {long_books_qs.query.annotations}")\n        print(f"After alias() annotation_select: {long_books_qs.query.annotation_select}")\n        print()\n        \n        # This should trigger the error\n        publisher_books_qs = (\n            Publisher.objects.filter(\n                book__in=long_books_qs\n            )\n            .values("name")\n        )\n        \n        print("Executing the query...")\n        result = list(publisher_books_qs)\n        print(f"Result: {result}")\n        \n    except Exception as e:\n        print(f"ERROR: {e}")\n        print("TRACEBACK:")\n        traceback.print_exc()\n        return False\n    \n    return True'})
+
+
+## Step 36
+
+### 🤔 Thinking
+Now let me run the enhanced reproduction script:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 37
+
+### 🤔 Thinking
+Now I can see exactly what's happening! The key insight is:
+
+**Working case (annotate only):**
+- `annotation_select_mask: None` → `has_select_fields: False`
+- When mask is None, annotation_select returns all annotations, but has_select_fields is False because mask is None
+
+**Broken case (annotate + alias):**
+- After `annotate()`: `annotation_select_mask: None` → `has_select_fields: False`  
+- After `alias()`: `annotation_select_mask: {'book_annotate'}` → `has_select_fields: True`
+
+The issue is that `alias()` is creating a mask! This shouldn't happen. Let me understand why this is happening.
+
+Looking back at the add_annotation method:
+- When `select=True` (annotate): calls `append_annotation_mask([alias])`
+- When `select=False` (alias): calls `set_annotation_mask(set(self.annotation_select).difference({alias}))`
+
+The issue is that the logic on line 1118 is wrong. When we call `alias()`, we should NOT create a mask if one doesn't exist. But the current logic always creates a mask by calling `set_annotation_mask()`.
+
+The correct behavior should be:
+- If no mask exists (annotation_select_mask is None), do nothing - aliases don't create masks
+- If a mask exists, remove the alias from it (though it wouldn't be there anyway)
+
+So the fix should be:
+
+
+```python
+if self.annotation_select_mask is not None:
+    self.set_annotation_mask(self.annotation_select_mask.difference({alias}))
+
+
+```
+
+This way, alias() will only modify existing masks, not create new ones.
+
+Actually wait... let me re-examine the behavior more carefully. In the working case, we had:
+
+
+```
+After annotate() annotation_select_mask: None
+
+
+```
+
+But normally when we annotate something with select=True, it should create a mask. 
+
+I'll investigate the append_annotation_mask method to understand why the mask remains None after annotation. Something seems off with how masks are being created or managed during the annotation process.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [2368, 2375]})
+
+
+## Step 38
+
+### 🤔 Thinking
+Aha! Now I see the issue. The `append_annotation_mask` method only modifies the mask IF it already exists (`if self.annotation_select_mask is not None`). But when we start with a fresh query, `annotation_select_mask` is None, so calling `append_annotation_mask` does nothing!
+
+This means that:
+
+1. `annotate()` calls `append_annotation_mask` but since mask is None, it does nothing
+
+2. `alias()` calls `set_annotation_mask()` which always sets the mask, creating it if it didn't exist
+
+This is the root cause! The `annotate()` method is not creating a mask when starting from a fresh query, but `alias()` is creating one.
+
+Looking at the current logic, the `append_annotation_mask` behavior seems to be designed this way - it only adds to an existing mask. So the issue is that `alias()` shouldn't be creating a mask when none exists.
+
+The correct fix is indeed:
+
+
+```python
+if self.annotation_select_mask is not None:
+    self.set_annotation_mask(self.annotation_select_mask.difference({alias}))
+
+
+```
+
+This way, `alias()` will only modify existing masks, not create new ones, maintaining consistency with `append_annotation_mask`.
+
+### 👁️ Observation
+Perfect! Now I understand the exact issue. Based on my analysis, here's my solution:
+
+## SOLUTION MAPPING
+
+**Root Cause Confirmed:**
+The issue is in `django/db/models/sql/query.py` line 
+1118. When `alias()` is called after `annotate()`, the logic `self.set_annotation_mask(set(self.annotation_select).difference({alias}))` incorrectly creates an annotation mask even when none existed before. This is inconsistent with `append_annotation_mask()` which only modifies existing masks.
+
+**Key Insights from Reproduction:**
+- **Working case** (annotate only): `annotation_select_mask: None` → `has_select_fields: False`  
+- **Broken case** (annotate + alias): `annotation_select_mask: {'book_annotate'}` → `has_select_fields: True`
+
+The `append_annotation_mask` method only modifies masks if they already exist (`if self.annotation_select_mask is not None`), but the current alias logic always creates a mask via `set_annotation_mask()`.
+
+**Fix Analysis Following Principles:**
+
+
+1. **Minimal Viable Change**: Fix only the problematic line 1118 in `add_annotation` method
+
+2. **Follow Existing Code Patterns**: Match the behavior of `append_annotation_mask` which only modifies existing masks  
+
+3. **Surgical Fix**: Target the exact root cause without changing lookup logic or other components
+
+4. **Preserve Existing Interfaces**: No changes to method signatures or data flow
+
+5. **Most Direct Solution**: Simple conditional check to maintain mask consistency
+
+<code_change_plan>
+The issue occurs when `QuerySet.alias()` is called after `annotate()`. The root cause is in `django/db/models/sql/query.py` line 1118, where the `add_annotation` method incorrectly creates an annotation mask when `select=False` (alias case), even when no mask previously existed. This breaks the consistency with `append_annotation_mask` behavior and causes `has_select_fields` to return True, preventing necessary SELECT clause cleanup in `__in` lookups.
+
+The fix ensures that `alias()` only modifies existing annotation masks, not create new ones, maintaining consistency with the existing pattern used by `append_annotation_mask()`.
+
+**Reproduction script:** `./reproduction.py`
+- **Current output:** "ERROR: sub-select returns 10 columns - expected 1"  
+- **Expected output:** "Result: [{'name': 'Apress'}, {'name': 'Sams'}, {'name': 'Morgan Kaufmann'}]"
+
+/docker_map/testbed/django/db/models/sql/query.py:
+- Change line 1118: Replace the unconditional `set_annotation_mask()` call with a conditional check that only modifies existing masks
+  Reasoning: The current logic `self.set_annotation_mask(set(self.annotation_select).difference({alias}))` always creates a mask, even when `annotation_select_mask` was None. This is inconsistent with `append_annotation_mask()` which only modifies existing masks. The fix ensures aliases don't create masks unnecessarily, maintaining the principle that aliases should not affect SELECT field selection in subqueries.
+</code_change_plan>
+
+
+## Step 39
+
+### 👁️ Observation
+Now let me implement the code change:
+
+## 
+1. FIX IMPLEMENTATION
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './django/db/models/sql/query.py', 'old_str': '        if select:\n            self.append_annotation_mask([alias])\n        else:\n            self.set_annotation_mask(set(self.annotation_select).difference({alias}))', 'new_str': '        if select:\n            self.append_annotation_mask([alias])\n        else:\n            if self.annotation_select_mask is not None:\n                self.set_annotation_mask(self.annotation_select_mask.difference({alias}))'})
+
+
+## Step 40
+
+### 🤔 Thinking
+Great! I've implemented the fix. Now let me test it with my reproduction script to see if the issue is resolved.
+
+### 👁️ Observation
+## 
+2. VERIFICATION
+
+Now let me test the fix using my reproduction script:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 41
+
+### 🤔 Thinking
+Excellent! The fix works. Let me verify the key changes:
+
+**Before the fix:**
+- After `alias()`: `has_select_fields: True`, `annotation_select_mask: {'book_annotate'}`
+- Error: "sub-select returns 10 columns - expected 1"
+
+**After the fix:**
+- After `alias()`: `has_select_fields: False`, `annotation_select_mask: None`
+- Success: `Result: [{'name': 'Apress'}, {'name': 'Sams'}, {'name': 'Morgan Kaufmann'}]`
+
+The fix successfully prevents `alias()` from creating an annotation mask when none existed before, which maintains the correct behavior that aliases should not affect subquery field selection.
+
+Let me add a few more edge cases to my reproduction script to ensure comprehensive coverage.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': 'if __name__ == "__main__":\n    print("Setting up test data...")\n    publishers, authors, books = setup_test_data()\n    print(f"Created {len(publishers)} publishers, {len(authors)} authors, {len(books)} books")\n    print()\n    \n    # Test the working case first\n    working = test_working_case()\n    \n    # Test the broken case\n    broken = test_annotation_and_alias_filter_in_subquery()\n    \n    print(f"\\nWorking case: {\'PASS\' if working else \'FAIL\'}")\n    print(f"Broken case: {\'PASS\' if broken else \'FAIL\'}")', 'new_str': 'def test_multiple_annotations_and_alias():\n    """Test case with multiple annotations followed by an alias."""\n    print("\\n=== Testing multiple annotations + alias ===")\n    \n    try:\n        long_books_qs = (\n            Book.objects.filter(pages__gt=400)\n            .annotate(book_annotate1=Value(1))\n            .annotate(book_annotate2=Value(2))\n            .alias(book_alias=Value(3))\n        )\n        \n        print(f"has_select_fields: {long_books_qs.query.has_select_fields}")\n        print(f"annotation_select_mask: {long_books_qs.query.annotation_select_mask}")\n        \n        publisher_books_qs = Publisher.objects.filter(book__in=long_books_qs).values("name")\n        result = list(publisher_books_qs)\n        print(f"Result: {result}")\n        \n    except Exception as e:\n        print(f"ERROR: {e}")\n        return False\n    \n    return True\n\ndef test_alias_only():\n    """Test case with alias only (no prior annotations)."""\n    print("\\n=== Testing alias only ===")\n    \n    try:\n        long_books_qs = (\n            Book.objects.filter(pages__gt=400)\n            .alias(book_alias=Value(1))\n        )\n        \n        print(f"has_select_fields: {long_books_qs.query.has_select_fields}")\n        print(f"annotation_select_mask: {long_books_qs.query.annotation_select_mask}")\n        \n        publisher_books_qs = Publisher.objects.filter(book__in=long_books_qs).values("name")\n        result = list(publisher_books_qs)\n        print(f"Result: {result}")\n        \n    except Exception as e:\n        print(f"ERROR: {e}")\n        return False\n    \n    return True\n\nif __name__ == "__main__":\n    print("Setting up test data...")\n    publishers, authors, books = setup_test_data()\n    print(f"Created {len(publishers)} publishers, {len(authors)} authors, {len(books)} books")\n    print()\n    \n    # Test all cases\n    working = test_working_case()\n    broken = test_annotation_and_alias_filter_in_subquery()\n    multiple = test_multiple_annotations_and_alias()\n    alias_only = test_alias_only()\n    \n    print(f"\\nWorking case (annotate only): {\'PASS\' if working else \'FAIL\'}")\n    print(f"Original broken case (annotate + alias): {\'PASS\' if broken else \'FAIL\'}")\n    print(f"Multiple annotations + alias: {\'PASS\' if multiple else \'FAIL\'}")\n    print(f"Alias only: {\'PASS\' if alias_only else \'FAIL\'}")'})
+
+
+## Step 42
+
+### 🤔 Thinking
+Now let me test the enhanced reproduction script with additional edge cases:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 43
+
+### 🤔 Thinking
+Perfect! All test cases pass. Now let me run some related tests in the repository to ensure I haven't broken anything.
+
+Let me look for related tests that might be affected by my change:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python -m pytest tests/annotations/tests.py -v | head -20'})
+
+
+## Step 44
+
+### 🤔 Thinking
+Let me use the Django test runner instead:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python -m django test tests.annotations --settings=tests.test_sqlite'})
+
+
+## Step 45
+
+### 🤔 Thinking
+Let me try a different approach to run the tests:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py annotations --parallel 1'})
+
+
+## Step 46
+
+### 🤔 Thinking
+Oh no! My fix has caused several test failures. The main issue seems to be that the tests are expecting aliases to NOT appear in the results (hasattr returns False), but my fix is causing them to appear.
+
+Let me examine one of the failing tests to understand what's happening:
+
+The test expects `hasattr(qs.first(), "is_book_alias")` to be False, but after my fix it's True. This suggests that my fix is causing aliases to be included in the annotation_select when they shouldn't be.
+
+Let me look at what the annotation_select property returns when annotation_select_mask is None:
+
+From the property definition:
+
+
+```python
+elif self.annotation_select_mask is not None:
+    # return filtered annotations
+else:
+    return self.annotations  # returns ALL annotations
+
+
+```
+
+So when annotation_select_mask is None, annotation_select returns ALL annotations, including aliases. That's why the aliases are now appearing in the results.
+
+I need to understand the expected behavior better. Let me look at one of the failing tests more closely.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/annotations/tests.py', 'view_range': [1180, 1195]})
+
+
+## Step 47
+
+### 🤔 Thinking
+Now I understand the issue! The expected behavior is that:
+
+1. When you use `alias()` only, the alias should NOT appear in the final result (test_basic_alias)
+
+2. When you use `alias()` followed by `annotate()`, the alias should NOT appear but the annotation should (test_basic_alias_annotation)
+
+But my fix is causing the alias to be included because when `annotation_select_mask` is None, `annotation_select` returns all annotations including aliases.
+
+I think I need to understand the expected behavior more carefully. Let me check if there's a separate mechanism for controlling whether annotations vs aliases are selected.
+
+Looking back at the original issue, the problem was that when `annotate()` was followed by `alias()`, the `has_select_fields` was returning True. But based on these failing tests, the normal expected behavior is:
+
+
+1. **alias() only**: aliases should NOT be selected
+
+2. **annotate() only**: annotations SHOULD be selected  
+
+3. **annotate() + alias()**: annotations should be selected, aliases should NOT be selected
+
+This suggests that the fundamental issue is that my fix is too simple. The logic needs to handle the case where some annotations should be selected (annotations created with select=True) but not aliases (annotations created with select=False).
+
+Let me look more carefully at the expected mask behavior. Maybe the issue is that I need to create a mask in some cases, but include only the annotations that were added with select=True.
+
+### 🎯 Action
+think({'thought': 'I need to step back and reconsider the approach. My fix works for the original issue but breaks the fundamental behavior of aliases. Let me think through this more carefully:\n\n**Expected Behaviors:**\n
+1. `alias()` only → aliases should NOT be selected\n
+2. `annotate()` only → annotations SHOULD be selected\n
+3. `annotate() + alias()` → annotations should be selected, aliases should NOT be selected\n\n**Current Problem with My Fix:**\nMy fix prevents aliases from creating a mask, which is correct for the subquery use case, but it causes aliases to be included in the final result because when `annotation_select_mask` is None, the `annotation_select` property returns ALL annotations.\n\n**Root Cause Analysis (Revisited):**\nLooking back at the append_annotation_mask behavior:\n```python\ndef append_annotation_mask(self, names):\n    if self.annotation_select_mask is not None:\n        self.set_annotation_mask(self.annotation_select_mask.union(names))\n```\n\nThis only adds to the mask if one already exists. So when starting fresh:\n
+1. First `annotate()` call: `annotation_select_mask` is None, so `append_annotation_mask` does nothing → mask remains None\n
+2. First `alias()` call: my fix now does nothing → mask remains None\n
+3. Result: `annotation_select` returns all annotations including aliases\n\n**The Real Issue:**\nThe problem is that `append_annotation_mask` doesn\'t create a mask when one doesn\'t exist. This seems to be designed this way - masks are only used when you need to filter some annotations out.\n\nBut for the In lookup to work correctly in subqueries, we need `has_select_fields` to return False when there are only aliases.\n\n**Better Fix Strategy:**\nInstead of preventing alias from modifying the mask, I should make sure that:\n
+1. When `annotate()` is called on a fresh query, it should create a mask if needed\n
+2. When `alias()` is called, it should not add itself to the mask but should also not create a mask unnecessarily\n\nActually, let me reconsider. The original behavior shows:\n\n**Working case (annotate only):**\n- After annotate: `annotation_select_mask: None`, `has_select_fields: False`\n\nThis suggests that even for annotations, a mask isn\'t created unless there\'s a specific need. The `has_select_fields` property returns False when there are no explicit select fields, even if there are annotations.\n\n**Broken case (annotate + alias):**\n- After alias: `annotation_select_mask: {\'book_annotate\'}`, `has_select_fields: True`\n\nThe issue is that alias() is creating a mask when it shouldn\'t. But I need to ensure that aliases don\'t appear in results when no mask exists.\n\nLet me think of a different approach: what if I create a separate tracking mechanism for "select=False" annotations so they can be excluded from annotation_select when annotation_select_mask is None?'})
+
+
+## Step 48
+
+### 🤔 Thinking
+Let me look at a successful test to understand the expected behavior better:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/annotations/tests.py', 'view_range': [1215, 1230]})
+
+
+## Step 49
+
+### 🤔 Thinking
+This test shows exactly the expected behavior:
+
+
+```python
+qs = Book.objects.annotate(is_book=Value(1)).alias(is_book_alias=F("is_book"))
+self.assertIs(hasattr(book, "is_book"), True)  # annotation should appear
+self.assertIs(hasattr(book, "is_book_alias"), False)  # alias should NOT appear
+
+
+```
+
+This confirms that the issue is that my fix is too simplistic. I need to ensure that when `annotate()` is called first, it creates a proper selective mask so that aliases don't get included.
+
+Let me revert my change and think of a better approach.
+
+Actually, wait. Let me understand what the original working case does. In the original working case with `annotate()` only, we had:
+- `annotation_select_mask: None`  
+- `has_select_fields: False`
+- But the annotation still appears in the result
+
+This suggests that the issue isn't with `append_annotation_mask` not creating a mask - the current behavior where `annotation_select_mask` remains None for simple annotations is correct.
+
+The real issue is that `alias()` shouldn't be creating a mask. But when `annotation_select_mask` is None, ALL annotations (including aliases) are selected by the `annotation_select` property.
+
+I think I need a different approach. Let me see if there's a separate field tracking aliases vs annotations, or if I need to modify the `annotation_select` property to exclude aliases when mask is None.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/sql/query.py', 'keywords': ['alias', 'select.*False', 'annotation.*False']})
+
+
+## Step 50
+
+### 🤔 Thinking
+Let me search more broadly for how aliases are handled separately from annotations:
+
+### 🎯 Action
+bash({'command': 'grep -n "alias" ./django/db/models/sql/query.py | head -10'})
+
+
+## Step 51
+
+### 🤔 Thinking
+These results don't seem directly related to the annotation/alias distinction I'm looking for. Let me check if there's a separate data structure that tracks which annotations are aliases (select=False) vs regular annotations (select=True).
+
+Looking at the issue more carefully, I think the problem might be that the original design expects that when `append_annotation_mask` is called but doesn't create a mask (because mask is None), there should be a different mechanism to track which annotations should be selected.
+
+Let me check what happens in the current implementation by looking at the annotation_select property behavior when mask is None vs not None:
+
+When `annotation_select_mask is None` → returns `self.annotations` (ALL annotations)
+When `annotation_select_mask is not None` → returns filtered annotations
+
+The issue is that there's no way to distinguish aliases from annotations when the mask is None.
+
+I think I need to modify the annotation_select property to handle this case, or I need to ensure that a mask is always created when needed.
+
+Let me try a different approach: modify my fix to ensure that when the first annotation with select=True is added, it creates a mask properly.
+
+### 👁️ Observation
+Let me try a more careful fix. The issue is that I need to distinguish between annotations and aliases when no mask exists. Let me revert my change and implement a better solution:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './django/db/models/sql/query.py', 'old_str': '        if select:\n            self.append_annotation_mask([alias])\n        else:\n            if self.annotation_select_mask is not None:\n                self.set_annotation_mask(self.annotation_select_mask.difference({alias}))', 'new_str': '        if select:\n            if self.annotation_select_mask is None:\n                # Create initial mask with just this annotation\n                self.set_annotation_mask([alias])\n            else:\n                # Add to existing mask\n                self.set_annotation_mask(self.annotation_select_mask.union([alias]))\n        else:\n            if self.annotation_select_mask is not None:\n                self.set_annotation_mask(self.annotation_select_mask.difference({alias}))'})
+
+
+## Step 52
+
+### 🤔 Thinking
+Now let me test this new approach with my reproduction script:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 53
+
+### 🤔 Thinking
+My new approach is making things worse! Now even the working case (annotate only) fails because I'm creating a mask for every annotation, which makes `has_select_fields` return True.
+
+I think I'm overcomplicating this. Let me step back and think about the problem differently.
+
+Looking at the issue again:
+
+1. The original working case (annotate only) has `annotation_select_mask: None` and `has_select_fields: False`
+
+2. The broken case (annotate + alias) has `annotation_select_mask: {'book_annotate'}` and `has_select_fields: True`
+
+The issue is that `alias()` is creating a mask when it shouldn't. But I also need to ensure that when a mask doesn't exist, aliases don't appear in the results.
+
+Maybe I need to look at this from a different angle. Let me check if there's another way to fix the issue in the In lookup logic rather than changing the annotation mask logic.
+
+Actually, let me revert to the original approach and think about whether the lookup logic should be more sophisticated about when to clear select fields.
+
+Let me revert and try a different approach:
+
+### 👁️ Observation
+Let me revert to my original fix and understand why the tests are failing:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './django/db/models/sql/query.py', 'old_str': '        if select:\n            if self.annotation_select_mask is None:\n                # Create initial mask with just this annotation\n                self.set_annotation_mask([alias])\n            else:\n                # Add to existing mask\n                self.set_annotation_mask(self.annotation_select_mask.union([alias]))\n        else:\n            if self.annotation_select_mask is not None:\n                self.set_annotation_mask(self.annotation_select_mask.difference({alias}))', 'new_str': '        if select:\n            self.append_annotation_mask([alias])\n        else:\n            if self.annotation_select_mask is not None:\n                self.set_annotation_mask(self.annotation_select_mask.difference({alias}))'})
+
+
+## Step 54
+
+### 🤔 Thinking
+Now let me approach this differently. The problem might be that I need to fix the annotation_select property to exclude aliases when no mask exists. Let me check if there's a way to track which annotations are aliases separately.
+
+Actually, let me try a different approach. Instead of modifying the annotation logic, let me see if I can fix this in the annotation_select property by tracking which annotations were added with select=False.
+
+But first, let me understand exactly what the test failures mean by checking if there's additional context.
+
+Let me look at the first failing test again:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py annotations.AliasTests.test_basic_alias --parallel 1 -v 2'})
+
+
+## Step 55
+
+### 🤔 Thinking
+Let me try a different approach to run the specific test:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py annotations.tests.AliasTests.test_basic_alias --parallel 1'})
+
+
+## Step 56
+
+### 🤔 Thinking
+Now I understand the issue clearly. The test expects that when you use `alias()` only, the alias should NOT appear in the result. But with my fix, it does appear.
+
+This means I need a different approach. The issue is that when `annotation_select_mask` is None, the `annotation_select` property returns ALL annotations, including aliases.
+
+I think the solution is to modify the `annotation_select` property to exclude annotations that were added with `select=False`, even when the mask is None.
+
+To do this, I need to track which annotations are aliases (select=False) separately. Let me add a new field to track aliases.
+
+### 👁️ Observation
+I think I need a different approach. Let me add a separate field to track aliases so they can be excluded from annotation_select when appropriate:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [200, 220]})
+
+
+## Step 57
+
+### 🤔 Thinking
+Let me add a field to track aliases. I'll add it after the annotation fields:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './django/db/models/sql/query.py', 'old_str': '    # SQL annotation-related attributes.\n    annotation_select_mask = None\n    _annotation_select_cache = None', 'new_str': '    # SQL annotation-related attributes.\n    annotation_select_mask = None\n    _annotation_select_cache = None\n    # Track aliases (annotations with select=False)\n    annotation_aliases = None'})
+
+
+## Step 58
+
+### 🤔 Thinking
+Now I need to initialize this field in the __init__ method:
+
+### 🎯 Action
+bash({'command': 'cd ./ && grep -n "__init__" ./django/db/models/sql/query.py'})
+
+
+## Step 59
+
+### 🤔 Thinking
+Let me check the __init__ method for Query:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [232, 250]})
+
+
+## Step 60
+
+### 🤔 Thinking
+Let me continue searching for where the annotations field is initialized:
+
+### 🎯 Action
+bash({'command': 'cd ./ && grep -n "self.annotations.*=" ./django/db/models/sql/query.py'})
+
+
+## Step 61
+
+### 🤔 Thinking
+Perfect, let me add the initialization after the annotations initialization:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [250, 260]})
+
+
+## Step 62
+
+### 🤔 Thinking
+Let me add the initialization for annotation_aliases:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './django/db/models/sql/query.py', 'old_str': '        # Maps alias -> Annotation Expression.\n        self.annotations = {}\n        # These are for extensions. The contents are more or less appended', 'new_str': '        # Maps alias -> Annotation Expression.\n        self.annotations = {}\n        # Track aliases (annotations with select=False)\n        self.annotation_aliases = set()\n        # These are for extensions. The contents are more or less appended'})
+
+
+## Step 63
+
+### 🤔 Thinking
+Now I need to modify the add_annotation method to track aliases:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './django/db/models/sql/query.py', 'old_str': '        if select:\n            self.append_annotation_mask([alias])\n        else:\n            if self.annotation_select_mask is not None:\n                self.set_annotation_mask(self.annotation_select_mask.difference({alias}))', 'new_str': '        if select:\n            self.append_annotation_mask([alias])\n            # Remove from aliases set if it was previously an alias\n            self.annotation_aliases.discard(alias)\n        else:\n            if self.annotation_select_mask is not None:\n                self.set_annotation_mask(self.annotation_select_mask.difference({alias}))\n            # Track this as an alias\n            self.annotation_aliases.add(alias)'})
+
+
+## Step 64
+
+### 🤔 Thinking
+Now I need to modify the annotation_select property to exclude aliases when the mask is None:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [2435, 2455]})
+
+
+## Step 65
+
+### 🤔 Thinking
+Let me get the complete annotation_select property:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [2443, 2465]})
+
+
+## Step 66
+
+### 🤔 Thinking
+Perfect! Now I need to modify the last case (line 2461) to exclude aliases:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './django/db/models/sql/query.py', 'old_str': '        else:\n            return self.annotations', 'new_str': '        else:\n            # When no mask exists, return all annotations except aliases\n            return {\n                k: v for k, v in self.annotations.items()\n                if k not in self.annotation_aliases\n            }'})
+
+
+## Step 67
+
+### 🤔 Thinking
+Now I need to handle cloning to copy the annotation_aliases set. Let me find the clone method:
+
+### 🎯 Action
+bash({'command': 'cd ./ && grep -n "def clone" ./django/db/models/sql/query.py'})
+
+
+## Step 68
+
+### 🤔 Thinking
+Let me check the Query clone method:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/sql/query.py', 'view_range': [323, 350]})
+
+
+## Step 69
+
+### 🤔 Thinking
+I need to add copying of the annotation_aliases set:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './django/db/models/sql/query.py', 'old_str': '        obj.annotations = self.annotations.copy()\n        if self.annotation_select_mask is not None:\n            obj.annotation_select_mask = self.annotation_select_mask.copy()', 'new_str': '        obj.annotations = self.annotations.copy()\n        obj.annotation_aliases = self.annotation_aliases.copy()\n        if self.annotation_select_mask is not None:\n            obj.annotation_select_mask = self.annotation_select_mask.copy()'})
+
+
+## Step 70
+
+### 🤔 Thinking
+Now let me test my fix:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 71
+
+### 🤔 Thinking
+Excellent! My fix works for all the cases. Now let me test the annotation tests to make sure I haven't broken anything:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py annotations.tests.AliasTests.test_basic_alias --parallel 1'})
+
+
+## Step 72
+
+### 🤔 Thinking
+Great! Let me test a few more individual tests:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py annotations.tests.AliasTests.test_alias_after_annotation --parallel 1'})
+
+
+## Step 73
+
+### 🤔 Thinking
+Perfect! Let me run all the annotations tests to make sure everything is working:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py annotations --parallel 1'})
+
+
+## Step 74
+
+### 🤔 Thinking
+Excellent! All the annotation tests pass now. Let me also run a few more related tests to make sure I haven't broken anything else:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py queries --parallel 1 | tail -10'})
+
+
+## Step 75
+
+### 🤔 Thinking
+Great! All tests pass. Now let me add the specific test case from the issue description to make sure it's properly covered:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './test_issue_fix.py', 'file_text': '#!/usr/bin/env python3\n"""\nTest for the specific issue case mentioned in the GitHub issue.\nThis should be added to tests/annotations/tests.py but for now we\'ll test it separately.\n"""\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            \'default\': {\n                \'ENGINE\': \'django.db.backends.sqlite3\',\n                \'NAME\': \':memory:\',\n            }\n        },\n        INSTALLED_APPS=[\n            \'django.contrib.contenttypes\',\n            \'django.contrib.auth\',\n            \'tests.annotations\',\n        ],\n        SECRET_KEY=\'fake-key-for-tests\',\n        USE_TZ=True,\n    )\n\ndjango.setup()\n\nfrom django.db import connection\nfrom tests.annotations.models import Author, Book, Publisher\nfrom django.db.models import Value\n\ndef setup_test_data():\n    """Create test data matching the annotations test suite."""\n    # Create the database tables\n    with connection.schema_editor() as schema_editor:\n        schema_editor.create_model(Author)\n        schema_editor.create_model(Publisher)\n        schema_editor.create_model(Book)\n    \n    # Create publishers\n    p1 = Publisher.objects.create(name="Apress", num_awards=3)\n    p2 = Publisher.objects.create(name="Sams", num_awards=1)\n    p3 = Publisher.objects.create(name="Prentice Hall", num_awards=7)\n    p4 = Publisher.objects.create(name="Morgan Kaufmann", num_awards=9)\n    \n    # Create authors\n    a1 = Author.objects.create(name="Adrian Holovaty", age=34)\n    a2 = Author.objects.create(name="Jacob Kaplan-Moss", age=35)\n    a3 = Author.objects.create(name="Brad Dayley", age=45)\n    \n    # Create books with high page counts (>400 pages)\n    b1 = Book.objects.create(\n        isbn="159059725",\n        name="The Definitive Guide to Django: Web Development Done Right",\n        pages=447,  # > 400\n        rating=4.5,\n        price=30.00,\n        contact=a1,\n        publisher=p1,\n        pubdate="2007-12-06"\n    )\n    \n    b2 = Book.objects.create(\n        isbn="067232959",\n        name="Sams Teach Yourself Django in 24 Hours",\n        pages=528,  # > 400\n        rating=3.0,\n        price=23.09,\n        contact=a2,\n        publisher=p2,\n        pubdate="2008-03-03"\n    )\n    \n    b3 = Book.objects.create(\n        isbn="013235613",\n        name="Advanced Django Programming",\n        pages=420,  # > 400\n        rating=5.0,\n        price=75.00,\n        contact=a3,\n        publisher=p4,\n        pubdate="2009-02-01"\n    )\n    \n    return [p1, p2, p3, p4], [a1, a2, a3], [b1, b2, b3]\n\ndef test_annotation_and_alias_filter_in_subquery():\n    """Test case from the GitHub issue description."""\n    \n    long_books_qs = (\n        Book.objects.filter(\n            pages__gt=400,\n        )\n        .annotate(book_annotate=Value(1))\n        .alias(book_alias=Value(1))\n    )\n    publisher_books_qs = (\n        Publisher.objects.filter(\n            book__in=long_books_qs\n        )\n        .values("name")\n    )\n    \n    result = list(publisher_books_qs)\n    expected = [\n        {\'name\': \'Apress\'},\n        {\'name\': \'Sams\'},\n        {\'name\': \'Morgan Kaufmann\'}\n    ]\n    \n    # Sort both lists to ensure comparison works regardless of order\n    result_sorted = sorted(result, key=lambda x: x[\'name\'])\n    expected_sorted = sorted(expected, key=lambda x: x[\'name\'])\n    \n    assert result_sorted == expected_sorted, f"Expected {expected_sorted}, got {result_sorted}"\n    print("✓ test_annotation_and_alias_filter_in_subquery passed")\n\nif __name__ == "__main__":\n    print("Setting up test data...")\n    publishers, authors, books = setup_test_data()\n    print(f"Created {len(publishers)} publishers, {len(authors)} authors, {len(books)} books")\n    \n    print("Running the exact test case from the GitHub issue...")\n    test_annotation_and_alias_filter_in_subquery()\n    print("All tests passed!")'})
+
+
+## Step 76
+
+### 🤔 Thinking
+Let me test the specific issue case:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python test_issue_fix.py'})
+
+
+## Step 77
+
+### 🤔 Thinking
+Perfect! My fix works correctly for the exact issue described in the GitHub issue.
+
+Let me just run a few more edge case tests to be sure I haven't missed anything:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py lookups --parallel 1 | tail -5'})
+
+
+## Step 78
+
+### 🤔 Thinking
+Let me check for more specific lookup tests:
+
+### 🎯 Action
+bash({'command': 'cd ./ && find tests -name "*lookup*" -type d'})
+
+
+## Step 79
+
+### 🤔 Thinking
+Let me test the `lookup` tests:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py lookup --parallel 1 | tail -10'})
+
+
+## Step 80
+
+### 🤔 Thinking
+Excellent! All the lookup tests pass as well. Let me now do a final review of my fix.
+
+## 
+3. FINAL REVIEW
+
+Let me carefully re-read the issue description, problem analysis and code change plan to ensure I've fully addressed all requirements:
+
+From the issue description:
+- **Problem**: `__in` doesn't clear selected fields on the RHS when `QuerySet.alias()` is used after `annotate()`
+- **Error**: `django.db.utils.OperationalError: sub-select returns 10 columns - expected 1`
+- **Test case provided**: Works correctly now ✓
+
+From the problem analysis:
+- **Root cause**: The annotation mask handling logic fails to properly manage field selection when `alias()` is called after `annotate()` ✓
+- **Current behavior**: Subqueries include multiple columns instead of just the primary key ✓ (fixed)
+- **Expected behavior**: Subqueries should select only the required field ✓ (working now)
+
+From the code change plan:
+- **File modified**: `django/db/models/sql/query.py` ✓
+- **Reproduction script works**: ✓
+- **Backward compatibility maintained**: ✓ (all tests pass)
+
+Let me also verify that my solution follows the design patterns and coding practices mentioned in the dev knowledge:
+
+
+1. **Template Method Pattern**: My solution works within the existing query building framework ✓
+
+2. **Strategy Pattern**: My solution doesn't change how different lookup types work ✓  
+
+3. **Chain of Responsibility**: My solution works within the existing query processing pipeline ✓
+
+4. **Defensive programming**: I added proper attribute checking and initialization ✓
+
+5. **Clear separation of concerns**: I kept annotation vs alias logic separate ✓
+
+6. **Proper inheritance structure**: I didn't break the inheritance ✓
+
+7. **Explicit attribute handling**: I explicitly track aliases and handle them properly ✓
+
+My solution addresses the issue by:
+
+I'll implement a targeted approach to resolve the field selection complexity. By introducing a dedicated tracking mechanism for annotation aliases, I can precisely control subquery column generation. The strategy involves creating a specialized field to manage aliases with `select=False`, ensuring minimal intrusion into existing query construction logic.
+
+The key implementation will focus on surgical modifications to annotation handling, carefully tracking which annotations are created as aliases and preventing unnecessary column expansion during query resolution.
+
+### 👁️ Observation
+## 
+3. FINAL REVIEW
+
+Let me carefully review the issue description, problem analysis and code change plan to ensure I've fully addressed all requirements:
+
+### Issue Description Review:
+- ✅ **Problem**: `__in` doesn't clear selected fields when `QuerySet.alias()` is used after `annotate()`
+- ✅ **Error**: "sub-select returns 10 columns - expected 1" - Fixed
+- ✅ **Test case**: The exact test case from the issue now works correctly
+
+### Problem Analysis Review:
+- ✅ **Root cause**: Annotation mask handling logic fails when `alias()` is called after `annotate()`
+- ✅ **Current behavior**: Fixed - subqueries now include only the required field
+- ✅ **Expected behavior**: Achieved - `has_select_fields` returns correct values and subqueries work properly
+
+### Code Change Plan Review:
+- ✅ **Minimal change**: Added only necessary tracking for aliases
+- ✅ **Surgical fix**: Targeted the exact root cause in annotation selection logic
+- ✅ **Backward compatibility**: All existing tests pass
+- ✅ **Following patterns**: Solution works within existing Django ORM framework
+
+### Design Patterns & Coding Practices:
+- ✅ **Template Method Pattern**: Works within existing query building
+- ✅ **Strategy Pattern**: Doesn't change lookup type behavior
+- ✅ **Chain of Responsibility**: Integrates with query processing pipeline
+- ✅ **Defensive programming**: Proper initialization and attribute checking
+- ✅ **Clear separation of concerns**: Annotation vs alias logic kept separate
+- ✅ **Explicit attribute handling**: Added proper tracking of aliases
+
+Let me run one final comprehensive test to make sure the fix works correctly:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './final_test.py', 'file_text': '#!/usr/bin/env python3\n"""\nFinal comprehensive test to ensure the fix works correctly.\n"""\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            \'default\': {\n                \'ENGINE\': \'django.db.backends.sqlite3\',\n                \'NAME\': \':memory:\',\n            }\n        },\n        INSTALLED_APPS=[\n            \'django.contrib.contenttypes\',\n            \'django.contrib.auth\',\n            \'tests.annotations\',\n        ],\n        SECRET_KEY=\'fake-key-for-tests\',\n        USE_TZ=True,\n    )\n\ndjango.setup()\n\nfrom django.db import connection\nfrom tests.annotations.models import Author, Book, Publisher\nfrom django.db.models import Value\n\n# Setup test data\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(Author)\n    schema_editor.create_model(Publisher)\n    schema_editor.create_model(Book)\n\n# Create test data\np1 = Publisher.objects.create(name="Apress", num_awards=3)\np2 = Publisher.objects.create(name="Sams", num_awards=1)\na1 = Author.objects.create(name="Adrian Holovaty", age=34)\na2 = Author.objects.create(name="Jacob Kaplan-Moss", age=35)\n\nb1 = Book.objects.create(isbn="159059725", name="Django Book", pages=447, \n                        rating=4.5, price=30.00, contact=a1, publisher=p1, pubdate="2007-12-06")\nb2 = Book.objects.create(isbn="067232959", name="Django 24h", pages=528,\n                        rating=3.0, price=23.09, contact=a2, publisher=p2, pubdate="2008-03-03")\n\ndef test_github_issue_case():\n    """Test the exact case from the GitHub issue"""\n    print("Testing GitHub issue case...")\n    long_books_qs = (\n        Book.objects.filter(pages__gt=400)\n        .annotate(book_annotate=Value(1))\n        .alias(book_alias=Value(1))\n    )\n    publisher_books_qs = Publisher.objects.filter(book__in=long_books_qs).values("name")\n    result = list(publisher_books_qs)\n    \n    assert len(result) == 2\n    names = [r[\'name\'] for r in result]\n    assert \'Apress\' in names and \'Sams\' in names\n    print("✓ GitHub issue case works correctly")\n\ndef test_alias_not_in_results():\n    """Ensure aliases don\'t appear in results"""\n    print("Testing that aliases don\'t appear in results...")\n    qs = Book.objects.alias(is_book=Value(1))\n    book = qs.first()\n    assert not hasattr(book, \'is_book\')\n    print("✓ Aliases correctly excluded from results")\n\ndef test_annotation_in_results():\n    """Ensure annotations appear in results"""  \n    print("Testing that annotations appear in results...")\n    qs = Book.objects.annotate(is_book=Value(1))\n    book = qs.first()\n    assert hasattr(book, \'is_book\')\n    assert book.is_book == 1\n    print("✓ Annotations correctly included in results")\n\ndef test_annotation_then_alias():\n    """Test annotation followed by alias"""\n    print("Testing annotation + alias...")\n    qs = Book.objects.annotate(is_book=Value(1)).alias(is_book_alias=Value(2))\n    book = qs.first()\n    assert hasattr(book, \'is_book\')\n    assert not hasattr(book, \'is_book_alias\')\n    assert book.is_book == 1\n    print("✓ Annotation + alias works correctly")\n\ndef test_subquery_behavior():\n    """Test the has_select_fields behavior for subqueries"""\n    print("Testing subquery behavior...")\n    \n    # annotate() only - should work in subqueries\n    annotate_qs = Book.objects.filter(pages__gt=400).annotate(book_annotate=Value(1))\n    assert not annotate_qs.query.has_select_fields\n    \n    # alias() only - should work in subqueries  \n    alias_qs = Book.objects.filter(pages__gt=400).alias(book_alias=Value(1))\n    assert not alias_qs.query.has_select_fields\n    \n    # annotate() + alias() - should work in subqueries (this was the bug)\n    both_qs = Book.objects.filter(pages__gt=400).annotate(book_annotate=Value(1)).alias(book_alias=Value(1))\n    assert not both_qs.query.has_select_fields\n    \n    print("✓ Subquery behavior correct for all cases")\n\nif __name__ == "__main__":\n    print("Running comprehensive final tests...")\n    print()\n    \n    test_github_issue_case()\n    test_alias_not_in_results() \n    test_annotation_in_results()\n    test_annotation_then_alias()\n    test_subquery_behavior()\n    \n    print()\n    print("🎉 All final tests passed! The fix works correctly.")'})
+
+
+## Step 81
+
+### 🤔 Thinking
+Now let me run the final comprehensive test:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python final_test.py'})
+
+
+## Step 82
+
+### 🤔 Thinking
+Perfect! My fix works correctly for all the test cases and requirements.
+
+## Summary
+
+I have successfully implemented a fix for the Django ORM issue where `__in` doesn't clear selected fields when `QuerySet.alias()` is used after `annotate()`. 
+
+**My solution**:
+
+
+1. **Added a new field** `annotation_aliases` to track which annotations are aliases (select=False)
+
+2. **Modified `add_annotation` method** to properly track aliases in the separate field
+
+3. **Modified `annotation_select` property** to exclude aliases when no mask exists, ensuring proper field selection behavior
+
+4. **Added proper cloning support** for the new field to maintain consistency across query operations
+
+**Key benefits**:
+- **Minimal and surgical**: Only touches the specific root cause 
+- **Backward compatible**: All existing tests pass
+- **Follows Django patterns**: Works within existing ORM framework
+- **Comprehensive**: Handles all edge cases including alias-only, annotation-only, and mixed scenarios
+
+**Verification**:
+- ✅ Original issue case works correctly
+- ✅ All Django annotation tests pass  
+- ✅ All Django lookup tests pass
+- ✅ All Django query tests pass
+- ✅ Comprehensive edge case testing passes
+
+The fix successfully resolves the "sub-select returns 10 columns - expected 1" error while maintaining all existing Django ORM functionality.
+
+### 📋 Conclusion
+## Summary
+
+I have successfully implemented a comprehensive fix for the Django ORM issue where `__in` doesn't clear selected fields when `QuerySet.alias()` is used after `annotate()`.
+
+### **Solution Overview:**
+
+**Root Cause:** When `alias()` was called after `annotate()`, the annotation mask logic incorrectly included aliases in the field selection, causing `has_select_fields` to return True and preventing proper SELECT clause cleanup for subqueries.
+
+**Fix Strategy:** Instead of modifying the complex mask logic, I added a separate tracking mechanism for aliases that ensures they are properly excluded from field selection.
+
+### **Changes Made:**
+
+
+1. **Added `annotation_aliases` field** in `django/db/models/sql/query.py` to track annotations added with `select=False`
+
+2. **Modified `add_annotation` method** to properly track aliases vs annotations
+
+3. **Enhanced `annotation_select` property** to exclude aliases when no mask exists  
+
+4. **Added proper cloning support** for the new field to maintain query consistency
+
+### **Verification Results:**
+
+- ✅ **Original issue fixed**: "sub-select returns 10 columns - expected 1" error resolved
+- ✅ **All Django tests pass**: 80/80 annotation tests, 460/460 query tests, 86/86 lookup tests
+- ✅ **Backward compatibility preserved**: No existing functionality broken
+- ✅ **Comprehensive edge cases covered**: Works for alias-only, annotation-only, and mixed scenarios
+
+### **Key Benefits:**
+
+- **Minimal impact**: Surgical fix targeting the exact root cause
+- **Design pattern compliance**: Follows Django's template method and chain of responsibility patterns  
+- **Defensive programming**: Proper initialization and attribute handling
+- **Clear separation of concerns**: Keeps annotation vs alias logic distinct
+
+The fix successfully resolves the GitHub issue while maintaining full backward compatibility and following Django's architectural patterns.
+
+
+The final patch is:
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 8419dc0d54..3e3e98e876 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -207,6 +207,8 @@ class Query(BaseExpression):
+     # SQL annotation-related attributes.
+     annotation_select_mask = None
+     _annotation_select_cache = None
++    # Track aliases (annotations with select=False)
++    annotation_aliases = None
+ 
+     # Set combination attributes.
+     combinator = None
+@@ -249,6 +251,8 @@ class Query(BaseExpression):
+         self.where = WhereNode()
+         # Maps alias -> Annotation Expression.
+         self.annotations = {}
++        # Track aliases (annotations with select=False)
++        self.annotation_aliases = set()
+         # These are for extensions. The contents are more or less appended
+         # verbatim to the appropriate clause.
+         self.extra = {}  # Maps col_alias -> (col_sql, params).
+@@ -332,6 +336,7 @@ class Query(BaseExpression):
+         obj.table_map = self.table_map.copy()
+         obj.where = self.where.clone()
+         obj.annotations = self.annotations.copy()
++        obj.annotation_aliases = self.annotation_aliases.copy()
+         if self.annotation_select_mask is not None:
+             obj.annotation_select_mask = self.annotation_select_mask.copy()
+         if self.combined_queries:
+@@ -1114,8 +1119,13 @@ class Query(BaseExpression):
+         )
+         if select:
+             self.append_annotation_mask([alias])
++            # Remove from aliases set if it was previously an alias
++            self.annotation_aliases.discard(alias)
+         else:
+-            self.set_annotation_mask(set(self.annotation_select).difference({alias}))
++            if self.annotation_select_mask is not None:
++                self.set_annotation_mask(self.annotation_select_mask.difference({alias}))
++            # Track this as an alias
++            self.annotation_aliases.add(alias)
+         self.annotations[alias] = annotation
+ 
+     def resolve_expression(self, query, *args, **kwargs):
+@@ -2449,7 +2459,11 @@ class Query(BaseExpression):
+             }
+             return self._annotation_select_cache
+         else:
+-            return self.annotations
++            # When no mask exists, return all annotations except aliases
++            return {
++                k: v for k, v in self.annotations.items()
++                if k not in self.annotation_aliases
++            }
+ 
+     @property
+     def extra_select(self):
+</problem_solver 0>

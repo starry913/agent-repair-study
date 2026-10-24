@@ -1,0 +1,122 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index fb6639793a..4383a4a114 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -1812,6 +1812,92 @@ def prefetch_related_objects(model_instances, *related_lookups):
+                 obj_list = new_obj_list
+ 
+ 
++def _get_queryset_loaded_field_names(queryset):
++    """
++    Extract field names that should be loaded for a model based on its 
++    queryset's deferred_loading configuration.
++    
++    Returns a set of field attribute names that should be loaded, 
++    or None if all fields should be loaded.
++    """
++    model_cls = queryset.model
++    deferred_fields, is_defer = queryset.query.deferred_loading
++    
++    if not deferred_fields:
++        # No defer/only configuration, all fields are loaded
++        return None
++        
++    if is_defer:
++        # defer() was used - load all fields except the deferred ones
++        all_field_names = {f.attname for f in model_cls._meta.concrete_fields}
++        return all_field_names - deferred_fields
++    else:
++        # only() was used - load only the specified fields (plus pk)
++        loaded_fields = set(deferred_fields)
++        # Always include primary key
++        loaded_fields.add(model_cls._meta.pk.attname)
++        return loaded_fields
++
++
++def _update_instance_field_state(instance, loaded_field_names, source_instances=None):
++    """
++    Update instance field loading state to mark specific fields as loaded.
++    
++    This ensures that fields which should be loaded according to a queryset's
++    deferred_loading configuration are properly marked as loaded in the 
++    instance's __dict__, preventing unnecessary database queries.
++    
++    This function handles Django's identity map by finding and updating other
++    instances with the same model and primary key. This is specifically needed
++    for OneToOneField and similar relationships where Django ensures identity
++    but field loading state can become inconsistent.
++    """
++    if loaded_field_names is None:
++        return
++    
++    # Only apply the identity map fix if we have source instances to copy from
++    # This makes the fix more targeted and avoids unnecessary work
++    if not source_instances:
++        return
++    
++    # Try to locate other instances with the same model and pk
++    instance_key = (instance.__class__, getattr(instance, 'pk', None))
++    
++    if instance_key[1] is None:
++        return
++    
++    import gc
++    instances_to_update = [instance]
++    
++    # Search for additional instances, but limit the search to avoid performance impact
++    found_count = 0 
++    for obj in gc.get_objects():
++        if (found_count >= 3 or  # Reduced limit for better performance
++            obj is instance or 
++            not isinstance(obj, instance.__class__) or
++            not hasattr(obj, 'pk') or obj.pk != instance_key[1] or
++            not hasattr(obj, '__dict__')):  # Must have __dict__ to update
++            continue
++        instances_to_update.append(obj)
++        found_count += 1
++        
++    # Only proceed if we found additional instances (indicating potential identity map issue)
++    if len(instances_to_update) <= 1:
++        return
++        
++    for target_instance in instances_to_update:
++        for field_name in loaded_field_names:
++            if field_name not in target_instance.__dict__:
++                # Try to copy from source instances
++                for source in source_instances:
++                    if (source.__class__ == target_instance.__class__ and 
++                        hasattr(source, 'pk') and hasattr(target_instance, 'pk') and
++                        source.pk == target_instance.pk and field_name in source.__dict__):
++                        # Copy the field value from the source instance
++                        target_instance.__dict__[field_name] = source.__dict__[field_name]
++                        break
++
++
+ def get_prefetcher(instance, through_attr, to_attr):
+     """
+     For the attribute 'through_attr' on the given instance, find
+@@ -1913,6 +1999,9 @@ def prefetch_one_level(instances, prefetcher, lookup, level):
+     for rel_obj in all_related_objects:
+         rel_attr_val = rel_obj_attr(rel_obj)
+         rel_obj_cache.setdefault(rel_attr_val, []).append(rel_obj)
++    
++    # Extract field loading information for use in relationship assignment
++    loaded_field_names = _get_queryset_loaded_field_names(rel_qs)
+ 
+     to_attr, as_attr = lookup.get_current_to_attr(level)
+     # Make sure `to_attr` does not conflict with a field.
+@@ -1948,6 +2037,14 @@ def prefetch_one_level(instances, prefetcher, lookup, level):
+                 # No to_attr has been given for this prefetch operation and the
+                 # cache_name does not point to a descriptor. Store the value of
+                 # the field in the object's field cache.
++                
++                # Before storing, update field state for identity map consistency
++                # This fixes the issue where the same model instance accessed through
++                # different querysets with different field specifications causes
++                # incorrect deferred field detection
++                if val is not None and hasattr(val, 'get_deferred_fields') and loaded_field_names is not None:
++                    _update_instance_field_state(val, loaded_field_names, all_related_objects)
++                
+                 obj._state.fields_cache[cache_name] = val
+         else:
+             if as_attr:

@@ -1,0 +1,135 @@
+diff --git a/sphinx/directives/other.py b/sphinx/directives/other.py
+index 35e16e623..6ec5dea40 100644
+--- a/sphinx/directives/other.py
++++ b/sphinx/directives/other.py
+@@ -76,6 +76,24 @@ class TocTree(SphinxDirective):
+         ret.append(wrappernode)
+         return ret
+ 
++    def _is_valid_builtin_ref(self, ref: str) -> bool:
++        """Check if ref is a valid StandardDomain built-in reference that will be available."""
++        std_domain = self.env.get_domain('std')
++        
++        # Check if it's a built-in label
++        if ref in std_domain.labels or ref in std_domain.anonlabels:
++            # Check configuration-based availability
++            if ref == 'genindex':
++                return self.config.html_use_index
++            elif ref == 'modindex':
++                return self.config.html_domain_indices
++            elif ref == 'search':
++                return True  # search is always available
++            else:
++                return True  # other built-in labels are generally available
++        
++        return False
++
+     def parse_content(self, toctree: addnodes.toctree) -> List[Node]:
+         suffixes = self.config.source_suffix
+ 
+@@ -119,16 +137,21 @@ class TocTree(SphinxDirective):
+                 if url_re.match(ref) or ref == 'self':
+                     toctree['entries'].append((title, ref))
+                 elif docname not in self.env.found_docs:
+-                    if excluded(self.env.doc2path(docname, False)):
++                    # Check if it's a valid built-in reference before warning
++                    if self._is_valid_builtin_ref(ref):
++                        toctree['entries'].append((title, ref))
++                    elif excluded(self.env.doc2path(docname, False)):
+                         message = __('toctree contains reference to excluded document %r')
+                         subtype = 'excluded'
++                        logger.warning(message, docname, type='toc', subtype=subtype,
++                                       location=toctree)
++                        self.env.note_reread()
+                     else:
+                         message = __('toctree contains reference to nonexisting document %r')
+                         subtype = 'not_readable'
+-
+-                    logger.warning(message, docname, type='toc', subtype=subtype,
+-                                   location=toctree)
+-                    self.env.note_reread()
++                        logger.warning(message, docname, type='toc', subtype=subtype,
++                                       location=toctree)
++                        self.env.note_reread()
+                 else:
+                     if docname in all_docnames:
+                         all_docnames.remove(docname)
+diff --git a/sphinx/environment/adapters/toctree.py b/sphinx/environment/adapters/toctree.py
+index 9678e3c7c..7b403cf8f 100644
+--- a/sphinx/environment/adapters/toctree.py
++++ b/sphinx/environment/adapters/toctree.py
+@@ -23,6 +23,38 @@ class TocTree:
+     def __init__(self, env: "BuildEnvironment") -> None:
+         self.env = env
+ 
++    def _create_builtin_toctree_node(self, ref: str, title: Optional[str]) -> Optional[nodes.Element]:
++        """Create a toctree node for built-in references like genindex, modindex, search."""
++        std_domain = self.env.get_domain('std')
++        
++        # Check if it's a valid built-in label
++        if ref in std_domain.labels:
++            docname, labelid, sectname = std_domain.labels[ref]
++            if not title:
++                title = sectname
++        elif ref in std_domain.anonlabels:
++            docname, labelid = std_domain.anonlabels[ref]
++            if not title:
++                title = ref  # fallback to ref name
++            sectname = title
++        else:
++            return None
++        
++        if not docname:
++            return None
++        
++        # Create reference node similar to how URLs are handled
++        reference = nodes.reference('', '', internal=True,
++                                  refuri=docname,
++                                  anchorname=labelid if labelid else '',
++                                  *[nodes.Text(title)])
++        para = addnodes.compact_paragraph('', '', reference)
++        item = nodes.list_item('', para)
++        # Built-in references don't have sub-toctrees
++        toc = nodes.bullet_list('', item)
++        
++        return toc
++
+     def note(self, docname: str, toctreenode: addnodes.toctree) -> None:
+         """Note a TOC tree directive in a document and gather information about
+         file relations from it.
+@@ -146,17 +178,27 @@ class TocTree:
+                                            ref, ' <- '.join(parents),
+                                            location=ref, type='toc', subtype='circular')
+                             continue
+-                        refdoc = ref
+-                        toc = self.env.tocs[ref].deepcopy()
+-                        maxdepth = self.env.metadata[ref].get('tocdepth', 0)
+-                        if ref not in toctree_ancestors or (prune and maxdepth > 0):
+-                            self._toctree_prune(toc, 2, maxdepth, collapse)
+-                        process_only_nodes(toc, builder.tags)
++                        
++                        # Check if it's a built-in reference first
++                        builtin_toc = self._create_builtin_toctree_node(ref, title)
++                        if builtin_toc is not None:
++                            toc = builtin_toc
++                            # Built-in references don't need metadata processing
++                        else:
++                            refdoc = ref
++                            toc = self.env.tocs[ref].deepcopy()
++                            maxdepth = self.env.metadata[ref].get('tocdepth', 0)
++                            if ref not in toctree_ancestors or (prune and maxdepth > 0):
++                                self._toctree_prune(toc, 2, maxdepth, collapse)
++                            process_only_nodes(toc, builder.tags)
+                         if title and toc.children and len(toc.children) == 1:
+                             child = toc.children[0]
+                             for refnode in child.findall(nodes.reference):
+-                                if refnode['refuri'] == ref and \
+-                                   not refnode['anchorname']:
++                                # For built-in references, check against their docname/refuri
++                                if builtin_toc is not None:
++                                    # Built-in reference - replace title directly
++                                    refnode.children = [nodes.Text(title)]
++                                elif refnode['refuri'] == ref and not refnode['anchorname']:
+                                     refnode.children = [nodes.Text(title)]
+                     if not toc.children:
+                         # empty toc means: no titles will show up in the toctree

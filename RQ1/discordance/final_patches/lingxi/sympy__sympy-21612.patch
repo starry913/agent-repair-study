@@ -1,0 +1,98 @@
+diff --git a/sympy/printing/str.py b/sympy/printing/str.py
+index c3fdcdd435..091b920428 100644
+--- a/sympy/printing/str.py
++++ b/sympy/printing/str.py
+@@ -246,6 +246,32 @@ def strslice(x, dim):
+     def _print_DeferredVector(self, expr):
+         return expr.name
+ 
++    def _is_complex_denominator(self, original_arg, processed_denom):
++        """
++        Check if a denominator came from a complex division expression that needs parenthesization.
++        
++        Args:
++            original_arg: The original argument from expr.args before processing
++            processed_denom: The processed denominator (usually the base of the Pow)
++        
++        Returns:
++            bool: True if parentheses are needed around this denominator
++        """
++        # If the original arg was Pow(Pow(base, exp1), -1), it represents 1/(base^exp1)
++        # which should be parenthesized as (1/(base^exp1))
++        if (hasattr(original_arg, 'is_Pow') and original_arg.is_Pow and 
++            original_arg.exp == -1 and
++            hasattr(original_arg.base, 'is_Pow') and original_arg.base.is_Pow):
++            return True
++            
++        # If the original arg was Mul with negative exponents (like 1/x/y), 
++        # it represents a complex division
++        if (hasattr(original_arg, 'is_Mul') and original_arg.is_Mul and
++            any(hasattr(a, 'is_Pow') and a.is_Pow and a.exp.is_negative for a in original_arg.args)):
++            return True
++            
++        return False
++
+     def _print_Mul(self, expr):
+ 
+         prec = precedence(expr)
+@@ -292,7 +318,13 @@ def _print_Mul(self, expr):
+             if len(dfactors) > 1:
+                 return '%s/(%s)' % (n, d)
+             elif dfactors:
+-                return '%s/%s' % (n, d)
++                # Check if the single denominator factor came from a complex division
++                original_d_items = [item for item in args if isinstance(item, Pow) and bool(item.exp.as_coeff_Mul()[0] < 0)]
++                if (len(original_d_items) == 1 and 
++                    self._is_complex_denominator(original_d_items[0], d)):
++                    return '%s/(%s)' % (n, d)
++                else:
++                    return '%s/%s' % (n, d)
+             return n
+ 
+         c, e = expr.as_coeff_Mul()
+@@ -313,6 +345,9 @@ def _print_Mul(self, expr):
+             # use make_args in case expr was something like -x -> x
+             args = Mul.make_args(expr)
+ 
++        # Track original args for complex denominator detection
++        original_to_denom = {}  # Maps original args to their processed denominator forms
++        
+         # Gather args for numerator/denominator
+         def apow(i):
+             b, e = i.as_base_exp()
+@@ -330,13 +365,16 @@ def apow(i):
+                     isinstance(item, Pow) and
+                     bool(item.exp.as_coeff_Mul()[0] < 0)):
+                 if item.exp is not S.NegativeOne:
+-                    b.append(apow(item))
++                    processed = apow(item)
++                    b.append(processed)
++                    original_to_denom[id(processed)] = item
+                 else:
+                     if (len(item.args[0].args) != 1 and
+                             isinstance(item.base, Mul)):
+                         # To avoid situations like #14160
+                         pow_paren.append(item)
+                     b.append(item.base)
++                    original_to_denom[id(item.base)] = item
+             elif item.is_Rational and item is not S.Infinity:
+                 if item.p != 1:
+                     a.append(Rational(item.p))
+@@ -358,8 +396,16 @@ def apow(i):
+         if not b:
+             return sign + '*'.join(a_str)
+         elif len(b) == 1:
+-            return sign + '*'.join(a_str) + "/" + b_str[0]
++            # Check if the single denominator came from a complex division and needs parentheses
++            denom = b[0]
++            original_arg = original_to_denom.get(id(denom))
++
++            if original_arg and self._is_complex_denominator(original_arg, denom):
++                return sign + '*'.join(a_str) + "/(%s)" % b_str[0]
++            else:
++                return sign + '*'.join(a_str) + "/" + b_str[0]
+         else:
++
+             return sign + '*'.join(a_str) + "/(%s)" % '*'.join(b_str)
+ 
+     def _print_MatMul(self, expr):

@@ -1,0 +1,128 @@
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fafc1beee8..40e99a3450 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -5,6 +5,7 @@ from django.core import checks, exceptions
+ from django.db import NotSupportedError, connections, router
+ from django.db.models import lookups
+ from django.db.models.lookups import PostgresOperatorLookup, Transform
++from django.db.models.expressions import Value
+ from django.utils.translation import gettext_lazy as _
+ 
+ from . import Field
+@@ -479,6 +480,107 @@ class KeyTransformGte(KeyTransformNumericLookupMixin, lookups.GreaterThanOrEqual
+     pass
+ 
+ 
++class KeyTransformIn(lookups.In):
++    def process_rhs(self, compiler, connection):
++        # Let the base In class handle query preparation
++        rhs_sql, rhs_params = super().process_rhs(compiler, connection)
++        
++        if not self.rhs_is_direct_value():
++            return rhs_sql, rhs_params
++        
++        # Apply the same database-specific JSON transformations 
++        # that KeyTransformExact uses, but to the IN clause parameters
++        if connection.vendor == 'oracle':
++            # For Oracle: replace each parameter with JSON_QUERY/JSON_VALUE calls
++            func_sqls = []
++            final_params = []
++            param_index = 0
++            
++            for value in self.rhs:
++                if isinstance(value, KeyTransform):
++                    func_sqls.append('%s')
++                    final_params.append(rhs_params[param_index])
++                    param_index += 1
++                else:
++                    parsed_value = json.loads(json.dumps(value))  # Normalize
++                    function = 'JSON_QUERY' if isinstance(parsed_value, (list, dict)) else 'JSON_VALUE'
++                    func_sqls.append("%s('%s', '$.value')" % (
++                        function,
++                        json.dumps({'value': parsed_value}),
++                    ))
++                    # Oracle embeds values in SQL - skip this parameter
++                    if param_index < len(rhs_params):
++                        param_index += 1
++            
++            new_rhs = '(' + ', '.join(func_sqls) + ')'
++            return new_rhs, final_params
++            
++        elif connection.vendor in ('sqlite', 'mysql'):
++            # For SQLite and MySQL: wrap each parameter with JSON_EXTRACT(%s, '$')
++            func_sqls = []
++            final_params = []
++            param_index = 0
++            
++            for value in self.rhs:
++                if isinstance(value, KeyTransform):
++                    func_sqls.append('%s')
++                    final_params.append(rhs_params[param_index])
++                    param_index += 1
++                elif value is None:
++                    # Special handling for null values
++                    if connection.vendor == 'sqlite':
++                        func_sqls.append('%s')
++                        final_params.append('null')
++                        param_index += 1
++                    else:  # MySQL
++                        func_sqls.append("JSON_EXTRACT(%s, '$')")
++                        final_params.append(json.dumps(value) if value is not None else 'null')
++                        param_index += 1
++                else:
++                    func_sqls.append("JSON_EXTRACT(%s, '$')")
++                    final_params.append(rhs_params[param_index])
++                    param_index += 1
++                    
++            new_rhs = '(' + ', '.join(func_sqls) + ')'
++            return new_rhs, final_params
++        
++        # For PostgreSQL and other databases, use default behavior
++        return rhs_sql, rhs_params
++        
++    def as_sql(self, compiler, connection):
++        # Handle the special case where SQLite needs JSON_TYPE for null values
++        if (connection.vendor == 'sqlite' and self.rhs_is_direct_value() and
++            any(v is None for v in self.rhs)):
++            
++            # Split into null and non-null conditions
++            has_null = any(v is None for v in self.rhs)
++            non_null_values = [v for v in self.rhs if v is not None]
++            
++            clauses = []
++            all_params = []
++            
++            if non_null_values:
++                # Create a new In lookup for non-null values
++                non_null_in = KeyTransformIn(self.lhs, non_null_values)
++                in_sql, in_params = super(KeyTransformIn, non_null_in).as_sql(compiler, connection)
++                clauses.append(in_sql)
++                all_params.extend(in_params)
++            
++            if has_null:
++                # Use KeyTransformExact for null handling
++                null_exact = KeyTransformExact(self.lhs, None)
++                null_sql, null_params = null_exact.as_sql(compiler, connection)
++                clauses.append(null_sql)
++                all_params.extend(null_params)
++            
++            if len(clauses) > 1:
++                return '(%s)' % ' OR '.join(clauses), all_params
++            else:
++                return clauses[0], all_params
++                
++        return super().as_sql(compiler, connection)
++
++
+ KeyTransform.register_lookup(KeyTransformExact)
+ KeyTransform.register_lookup(KeyTransformIExact)
+ KeyTransform.register_lookup(KeyTransformIsNull)
+@@ -495,6 +597,8 @@ KeyTransform.register_lookup(KeyTransformLte)
+ KeyTransform.register_lookup(KeyTransformGt)
+ KeyTransform.register_lookup(KeyTransformGte)
+ 
++KeyTransform.register_lookup(KeyTransformIn)
++
+ 
+ class KeyTransformFactory:

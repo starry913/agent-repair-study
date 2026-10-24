@@ -1,0 +1,1937 @@
+<issue_description>
+SelectDateWidget can crash with OverflowError.
+Description
+	
+Given a relatively common view like this:
+from django import forms
+from django.forms import SelectDateWidget
+from django.http import HttpResponse
+class ReproForm(forms.Form):
+	 my_date = forms.DateField(widget=SelectDateWidget())
+def repro_view(request):
+	 form = ReproForm(request.GET) # for ease of reproducibility
+	 if form.is_valid():
+		 return HttpResponse("ok")
+	 else:
+		 return HttpResponse("not ok")
+# urls.py
+urlpatterns = [path('repro/', views.repro_view, name='repro')]
+A user can trigger a server crash, reproducible by running locally and visiting ​http://127.0.0.1:8000/repro/?my_date_day=1&my_date_month=1&my_date_year=1234567821345678, which results in
+[...] - ERROR - django.request: Internal Server Error: /repro/
+Traceback (most recent call last):
+[...]
+ File "[...]/site-packages/django/forms/widgets.py", line 1160, in value_from_datadict
+	date_value = datetime.date(int(y), int(m), int(d))
+OverflowError: signed integer is greater than maximum
+This can be triggered similarly for a post request.
+The issue happens as part of the validation logic run in form.is_valid, specifically, when calling the SelectDateWidget.value_from_datadict, where the user-controlled value is converted into a date without guarding against a possible OverflowError.
+Specifically, y, m and d are user controlled, and the code does this:
+ date_value = datetime.date(int(y), int(m), int(d)) 
+When large integers (larger than sys.maxsize) are supplied to date's constructor it will throw an OverflowError:
+>>> import datetime, sys
+>>> datetime.date(sys.maxsize+1, 3, 4)
+Traceback (most recent call last):
+ File "<stdin>", line 1, in <module>
+OverflowError: Python int too large to convert to C long
+</issue_description>
+
+<problem_decoder 0>
+## Step 1
+
+### 🤔 Thinking
+Let me start by understanding the issue described in the issue description. The user is describing a bug where a SelectDateWidget from Django forms can crash with an OverflowError when given very large integer values for the year component.
+
+From the issue description, the problem is:
+
+1. A user can cause a server crash by providing extremely large values for the year component of a date field using SelectDateWidget
+
+2. The crash happens in the `value_from_datadict` method in the `SelectDateWidget` class
+
+3. The specific error is an `OverflowError: signed integer is greater than maximum`
+
+4. This happens when `datetime.date(int(y), int(m), int(d))` is called with values larger than `sys.maxsize`
+
+Let me first explore the repository structure to understand how it's organized.
+
+### 👁️ Observation
+I'll help you analyze this issue. Let me start by exploring the repository structure to understand the codebase and then identify the relevant files related to the SelectDateWidget issue.
+
+### 🎯 Action
+view_directory({'dir_path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+This looks like the Django repository structure. I can see there's a `django/forms/` directory which is likely where the SelectDateWidget is implemented. Let me explore the forms directory to find the relevant files.
+
+### 👁️ Observation
+<observation>
+
+1. This appears to be the Django repository with a standard structure
+
+2. Found the django/forms/ directory which should contain the SelectDateWidget implementation
+
+3. Next action: Explore the forms directory to locate the SelectDateWidget code
+</observation>
+
+### 🎯 Action
+view_directory({'dir_path': './django/forms'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I can see there's a `widgets.py` file in the forms directory. Based on the issue description, the SelectDateWidget is implemented in `django/forms/widgets.py` and the error occurs in the `value_from_datadict` method. Let me examine this file.
+
+### 👁️ Observation
+<observation>
+
+1. Found the widgets.py file in django/forms/ which likely contains the SelectDateWidget implementation
+
+2. There are also select_date.html template files which suggest the widget has templates
+
+3. Next action: Search for SelectDateWidget in the widgets.py file to understand its implementation
+</observation>
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/widgets.py', 'keywords': ['SelectDateWidget', 'value_from_datadict', 'OverflowError']})
+
+
+## Step 4
+
+### 🤔 Thinking
+That's interesting - the search didn't find results. Let me look at the entire widgets.py file to understand its structure and find the SelectDateWidget implementation.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/forms/widgets.py'})
+
+
+## Step 5
+
+### 🤔 Thinking
+Great! Now I can see the file structure. I can see that `SelectDateWidget` is at line 1010, and it has a `value_from_datadict` method at line 
+1149. Let me look at that specific method to understand the issue.
+
+### 👁️ Observation
+<observation>
+
+1. Found SelectDateWidget class at line 1010 with value_from_datadict method at line 1149
+
+2. The file contains the complete widgets.py implementation showing various widget classes
+
+3. Next action: Examine the SelectDateWidget class and its value_from_datadict method specifically
+</observation>
+
+### 🎯 Action
+view_file_content({'file_name': 'django/forms/widgets.py', 'view_range': [1010, 1170]})
+
+
+## Step 6
+
+### 🤔 Thinking
+Perfect! Now I've found the problematic code. In the `value_from_datadict` method of the `SelectDateWidget` class (line 1149), there's the exact issue mentioned in the bug report:
+
+
+
+```python
+try:
+    date_value = datetime.date(int(y), int(m), int(d))
+except ValueError:
+    # Return pseudo-ISO dates with zeros for any unselected values,
+    # e.g. '2017-0-23'.
+    return "%s-%s-%s" % (y or 0, m or 0, d or 0)
+
+
+```
+
+The code only catches `ValueError` but doesn't catch `OverflowError` when the values are extremely large. When `int(y)`, `int(m)`, or `int(d)` are larger than `sys.maxsize`, `datetime.date()` will raise an `OverflowError` instead of a `ValueError`.
+
+Now let me search for similar issues in the codebase to understand the pattern of fixing this type of problem.
+
+### 👁️ Observation
+<observation>
+
+1. Found the exact problematic code at line 1159 in the `value_from_datadict` method of SelectDateWidget
+
+2. The issue is that the code only catches `ValueError` but not `OverflowError` when calling `datetime.date(int(y), int(m), int(d))`
+
+3. When extremely large values (larger than sys.maxsize) are passed, it raises `OverflowError` instead of `ValueError`
+
+4. Next action: Search for similar patterns in the codebase to understand how Django handles this type of issue
+</observation>
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['OverflowError', 'datetime.date', 'sys.maxsize']})
+
+
+## Step 7
+
+### 🤔 Thinking
+Interesting! I found that `OverflowError` is already handled in other parts of Django. Let me check how it's handled in forms/fields.py since that's likely to be related to form handling.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/forms/fields.py', 'view_range': [560, 580]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Great! I can see that in the forms/fields.py file, there's a pattern of handling `OverflowError` and converting it to a `ValidationError`. This is the appropriate way to handle this type of error in Django forms. Let me also check if there are any tests related to this issue to understand how it should be handled.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/forms_tests', 'keywords': ['SelectDateWidget', 'OverflowError', 'test_select_date']})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me check the test file for SelectDateWidget to understand how it's currently tested and what the expected behavior should be.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/forms_tests/widget_tests/test_selectdatewidget.py', 'view_range': [1, 50]})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me search for any existing tests that might be related to error handling or validation in the SelectDateWidget tests.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/forms_tests/widget_tests/test_selectdatewidget.py', 'keywords': ['value_from_datadict', 'error', 'invalid', 'ValueError']})
+
+
+## Step 11
+
+### 🤔 Thinking
+Let me look at the entire test file to understand the current test coverage and see if there are tests for value_from_datadict.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/forms_tests/widget_tests/test_selectdatewidget.py', 'view_range': [400, 450]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Perfect! I found a test that uses `value_from_datadict` on line 446-
+450. This helps me understand the expected behavior. Let me see the rest of this test file to understand the complete context.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/forms_tests/widget_tests/test_selectdatewidget.py', 'view_range': [440, 500]})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me also check the end of the test file to see if there are more tests that might help me understand how error cases should be handled.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/forms_tests/widget_tests/test_selectdatewidget.py', 'view_range': [600, 642]})
+
+
+## Step 14
+
+### 🤔 Thinking
+Excellent! I found the `test_value_from_datadict` method at line 603-
+622. This test shows how the widget handles different scenarios, including invalid dates like `"0-12-1"`. This is very helpful for understanding the expected behavior.
+
+Now let me check the development knowledge provided to see if there are any additional insights about how to handle this issue.
+
+Based on my exploration, I've found:
+
+
+1. The issue is in the `value_from_datadict` method of `SelectDateWidget` class in `django/forms/widgets.py` at line 
+1159. 
+2. The code only catches `ValueError` but doesn't catch `OverflowError` when calling `datetime.date(int(y), int(m), int(d))` with extremely large values.
+
+3. Django has a pattern of handling `OverflowError` in other parts of the codebase, such as in `django/forms/fields.py` line 
+568. 
+4. The current behavior when a `ValueError` occurs is to return a pseudo-ISO date format like `"2017-0-23"`.
+
+Now I need to think about what the fix should be. The development knowledge suggests looking at the general root cause analysis steps and understanding the involved components.
+
+Let me think about this:
+
+
+1. The root cause is that `datetime.date()` can raise `OverflowError` when the integer values are too large to be converted to C long.
+
+2. The current fix only catches `ValueError` but should also catch `OverflowError`.
+
+3. The expected behavior should be the same as when a `ValueError` occurs - return a pseudo-ISO date format.
+
+Let me now use the `ask_repository_agent` to get more insights about this issue.
+
+### 🎯 Action
+ask_repository_agent({'query': 'How does Django handle OverflowError in datetime operations? Are there any existing patterns for handling large integer values that could overflow when creating datetime objects?'})
+
+
+## Step 15
+
+### 🤔 Thinking
+Now let me also ask about the SelectDateWidget specifically to understand the expected behavior better.
+
+### 🎯 Action
+ask_repository_agent({'query': "What is the expected behavior of SelectDateWidget's value_from_datadict method when it encounters invalid date values? How should it handle cases where the year, month, or day values cause datetime.date() to raise exceptions?"})
+
+
+## Step 16
+
+### 🤔 Thinking
+This response doesn't seem to match the current implementation I've seen. Let me look at what the current implementation does in detail. Let me check the USE_L10N behavior more carefully.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/forms/widgets.py', 'view_range': [1149, 1170]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Now I have a clear understanding of the issue. Looking at the current implementation:
+
+
+1. The method tries to create a `datetime.date(int(y), int(m), int(d))` on line 
+1159. 
+2. If this fails with a `ValueError`, it returns a pseudo-ISO date format like `"2017-0-23"` on line 
+1163. 
+3. However, if the integer values are extremely large (larger than sys.maxsize), `datetime.date()` will raise an `OverflowError` instead of `ValueError`.
+
+4. Since `OverflowError` is not caught, it propagates up and crashes the application.
+
+The fix should be to also catch `OverflowError` and handle it the same way as `ValueError`.
+
+Let me also check the development knowledge to make sure I'm considering all aspects mentioned in the knowledge base.
+
+Looking at the provided knowledge:
+
+1. **General root cause analysis steps**: I need to identify the specific functionality (date handling in form widget), verify conditions, trace data flow, etc.
+
+2. **Bug categorization**: This is a "System Limitation Bug with Language Constraint" - it's related to Python's datetime limitations.
+
+3. **Relevant architecture**: This involves Django's Form System Layer and Date Handling System.
+
+4. **Involved components**: Django Forms System, specifically the Widget framework and data processing.
+
+5. **Specific classes/methods**: The issue is in SelectDateWidget.value_from_datadict() method.
+
+Now I have a comprehensive understanding of the issue. Let me provide my final analysis.
+
+### 🎯 Action
+think({'thought': 'Now I have enough information to provide a comprehensive analysis. Let me synthesize all the findings:\n\n
+1. **Problem**: The SelectDateWidget\'s value_from_datadict method can crash with an OverflowError when extremely large integer values (larger than sys.maxsize) are provided for the year, month, or day components.\n\n
+2. **Root Cause**: The code only catches ValueError but not OverflowError when calling datetime.date(int(y), int(m), int(d)). When values exceed sys.maxsize, Python\'s datetime.date() constructor raises an OverflowError instead of ValueError.\n\n
+3. **Current Behavior**: The method handles ValueError by returning a pseudo-ISO date format like "2017-0-23", but OverflowError is not caught and crashes the application.\n\n
+4. **Expected Behavior**: OverflowError should be caught and handled the same way as ValueError, returning a pseudo-ISO date format.\n\n
+5. **Location**: The issue is in django/forms/widgets.py line 1159 in the SelectDateWidget.value_from_datadict method.\n\n
+6. **Impact**: This is a security-relevant issue as it allows users to crash the server by providing malicious input.\n\n
+7. **Solution**: The fix is simple - catch both ValueError and OverflowError in the same except block, or catch the more general ArithmeticError which includes both.\n\nThis aligns with Django\'s existing patterns for handling similar issues in other parts of the codebase.'})
+
+
+## Step 18
+
+### 🤔 Thinking
+Now I'll provide the comprehensive issue analysis based on all my findings.
+
+### 📋 Conclusion
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "SelectDateWidget.value_from_datadict method in django/forms/widgets.py can crash with an OverflowError when extremely large integer values (larger than sys.maxsize) are provided for the year, month, or day components. This occurs because the method only catches ValueError but not OverflowError when calling datetime.date(int(y), int(m), int(d)). When values exceed sys.maxsize, Python's datetime.date() constructor raises an OverflowError instead of ValueError, causing a server crash."
+    - status: "yes - the issue exists in the current codebase"
+  </problem_statement>
+  <root_cause>
+    The root cause is in the SelectDateWidget.value_from_datadict method in django/forms/widgets.py at line 
+1159. The code attempts to construct a datetime.date object with user-provided integer values: `date_value = datetime.date(int(y), int(m), int(d))`. This call is wrapped in a try-except block that only catches ValueError (line 1160), but when extremely large integers (larger than sys.maxsize) are passed, the datetime.date constructor raises an OverflowError instead of ValueError. Since OverflowError is not caught, it propagates up and crashes the application with "OverflowError: signed integer is greater than maximum".
+  </root_cause>
+  <current_behavior>
+    The current implementation in django/forms/widgets.py lines 1149-1165 shows that the SelectDateWidget.value_from_datadict method:
+    
+1. Extracts year, month, and day values from the form data
+    
+2. Attempts to create a datetime.date object using datetime.date(int(y), int(m), int(d))
+    
+3. Only catches ValueError exceptions, returning a pseudo-ISO date format like "2017-0-23" for invalid dates
+    
+4. Does not catch OverflowError exceptions, causing the application to crash when extremely large values are provided
+    
+5. Returns the formatted date string using strftime if the date construction succeeds
+
+    The existing test coverage in tests/forms_tests/widget_tests/test_selectdatewidget.py shows tests for normal cases but does not include tests for overflow scenarios.
+  </current_behavior>
+  <expected_behavior>
+    The expected behavior after implementing the fix should be:
+    
+1. The SelectDateWidget.value_from_datadict method should catch both ValueError and OverflowError exceptions
+    
+2. When either exception occurs, it should return the same pseudo-ISO date format (e.g., "2017-0-23") as it currently does for ValueError
+    
+3. The application should not crash when users provide extremely large integer values for date components
+    
+4. The widget should handle overflow scenarios gracefully, maintaining consistency with the existing error handling pattern
+    
+5. New test cases should be added to verify that overflow scenarios are handled correctly
+    
+6. The fix should be minimal and consistent with Django's existing error handling patterns found in other parts of the codebase (like django/forms/fields.py line 568)
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 0>
+
+<problem_decoder 1>
+## Step 1
+
+### 🤔 Thinking
+I need to analyze this issue thoroughly. Let me break down what I understand from the issue description:
+
+
+1. The issue is about a SelectDateWidget in Django forms that can crash with an OverflowError
+
+2. The crash occurs when very large integers (larger than sys.maxsize) are passed as year values to the widget
+
+3. The specific error happens in the value_from_datadict method of SelectDateWidget when calling datetime.date(int(y), int(m), int(d))
+
+4. The problematic code is in site-packages/django/forms/widgets.py, line 1160
+
+Let me start by exploring the repository structure to understand the codebase layout and then search for the relevant files.
+
+### 👁️ Observation
+I'll help you analyze this issue. Let me start by exploring the repository structure to understand the codebase and then identify the specific problem.
+
+### 🎯 Action
+view_directory({'dir_path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Great! I can see this is a Django repository. Now I need to focus on the forms system since the issue is about SelectDateWidget. Let me explore the django/forms directory.
+
+### 🎯 Action
+view_directory({'dir_path': './django/forms/'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I can see there's a widgets.py file in the forms directory. Based on the issue description, the problem is specifically in the SelectDateWidget.value_from_datadict method in the widgets.py file. The stack trace mentioned line 1160 in widgets.py. Let me examine this file.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/forms/widgets.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Great! I can see the file, and I need to focus on the SelectDateWidget class. The file is quite long, so let me look specifically at the SelectDateWidget class and its value_from_datadict method around line 1149, since that's where the issue is mentioned to be occurring.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/forms/widgets.py', 'view_range': [1010, 1170]})
+
+
+## Step 5
+
+### 🤔 Thinking
+Perfect! I found the exact issue. Looking at lines 1149-1165, specifically line 1159 where the error occurs:
+
+
+
+```python
+date_value = datetime.date(int(y), int(m), int(d))
+
+
+```
+
+This is the exact line mentioned in the error stack trace. The issue is that when user-provided values for year, month, and day are extremely large (larger than `sys.maxsize`), the `int()` conversion will succeed but `datetime.date()` will fail with an `OverflowError` because it can't handle such large values.
+
+Let me now search for tests related to this widget to better understand how it should behave.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests', 'keywords': ['SelectDateWidget', 'OverflowError', 'value_from_datadict']})
+
+
+## Step 6
+
+### 🤔 Thinking
+Great! I found test files related to SelectDateWidget. Let me look at the specific test file for SelectDateWidget to understand how it's currently tested.
+
+### 🎯 Action
+view_file_content({'file_name': './tests/forms_tests/widget_tests/test_selectdatewidget.py', 'view_range': [440, 470]})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me search for more specific tests around value_from_datadict to see the full context of how it's tested.
+
+### 🎯 Action
+view_file_content({'file_name': './tests/forms_tests/widget_tests/test_selectdatewidget.py', 'view_range': [580, 630]})
+
+
+## Step 8
+
+### 🤔 Thinking
+I can see the current test cases for `value_from_datadict` but none of them test edge cases like extremely large values that would cause `OverflowError`. Let me continue exploring the issue by looking at some related fields to understand the expected behavior for invalid values.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms', 'keywords': ['DateField', 'to_python', 'ValidationError']})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me look at the DateField implementation to understand how it handles validation errors.
+
+### 🎯 Action
+view_file_content({'file_name': './django/forms/fields.py', 'view_range': [460, 500]})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me search for the BaseTemporalField implementation to understand the validation pattern.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/fields.py', 'keywords': ['BaseTemporalField']})
+
+
+## Step 11
+
+### 🤔 Thinking
+Let me look at the fields.py file more systematically to understand the validation structure.
+
+### 🎯 Action
+view_file_content({'file_name': './django/forms/fields.py', 'view_range': [420, 465]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Perfect! Now I understand the architecture better. The BaseTemporalField's `to_python` method handles ValueError and TypeError exceptions from strptime and converts them to ValidationError. This is the pattern that should be followed.
+
+Now let me look at the current issue more carefully. The problem is in the SelectDateWidget.value_from_datadict method. When it tries to create a datetime.date object with extremely large values, it gets an OverflowError that's not caught and handled gracefully.
+
+Let me also look at how other widgets handle similar cases to understand the expected behavior.
+
+### 🎯 Action
+ask_repository_agent({'query': "How does Django's form validation system typically handle input validation errors? What is the expected behavior when user input causes system-level exceptions like OverflowError?"})
+
+
+## Step 13
+
+### 🤔 Thinking
+Excellent! This gives me a clear understanding of how Django's form validation system works. The key insight is that when system-level exceptions like `OverflowError` occur during data conversion, they should be caught and converted to `ValidationError` exceptions instead of being allowed to propagate up and cause a 500 error.
+
+Now I have a clear understanding of the issue and the expected behavior. Let me check what the development knowledge says about this specific issue.
+
+### 🎯 Action
+think({'thought': "Now I need to analyze the issue thoroughly, taking into account the development knowledge provided. Let me evaluate each step:\n\n
+1. **READING Phase**:\n   - The issue is about SelectDateWidget's value_from_datadict method crashing with OverflowError\n   - The error occurs when extremely large year values (larger than sys.maxsize) are passed to datetime.date()\n   - The specific line is `date_value = datetime.date(int(y), int(m), int(d))` in line 1160 of django/forms/widgets.py\n   - The expected behavior should be to handle this gracefully and return appropriate validation errors\n\n
+2. **EXPLORATION Phase**:\n   - I found the exact location of the issue in django/forms/widgets.py at line 1159\n   - I examined how Django's form validation system typically handles such errors - by catching system-level exceptions and converting them to ValidationError\n   - The issue is that the SelectDateWidget.value_from_datadict method doesn't catch the OverflowError that can occur when creating datetime.date objects with extremely large values\n\n
+3. **Root Cause Analysis**:\n   - Looking at the general_root_cause_analysis_steps in the dev knowledge:\n     
+1. ✓ Identified the specific form field component (SelectDateWidget)\n     
+2. ✓ Reviewed error handling mechanisms (missing OverflowError handling)\n     
+3. ✓ Checked Python's built-in constraints (datetime.date has system limits)\n     
+4. ✓ Analyzed exception handling patterns (should convert to ValidationError)\n     
+5. ✓ Verified error message propagation (currently breaks with OverflowError)\n     
+6. ✓ Test edge cases that might trigger system limits (large year values)\n     
+7. ✓ Compared against expected form validation patterns (should handle gracefully)\n\n
+4. **Bug Categorization**:\n   - Type: Input Validation Error Handling ✓\n   - Characteristics: Uncaught system-level exception (OverflowError) ✓, Missing validation boundary check ✓, Improper error transformation ✓, User feedback failure ✓\n   - Impact Level: Field-level validation issue with system-wide implications ✓\n\n
+5. **Architecture and Components**:\n   - The issue involves Forms System (Field Validation Framework, Temporal Fields Handling) ✓\n   - Exception Handling System ✓\n   - Data Type Conversion System ✓\n   - User Input Processing Pipeline ✓\n   - Error Message Management ✓\n\nThe issue is clear: SelectDateWidget.value_from_datadict needs to catch OverflowError and handle it gracefully by returning an appropriate value that will be handled by the form validation system."})
+
+
+## Step 14
+
+### 🤔 Thinking
+Now I need to analyze the current behavior more thoroughly. Let me look at what the SelectDateWidget.value_from_datadict method currently does when there's a ValueError vs what should happen with OverflowError.
+
+### 👁️ Observation
+<observation>
+
+1. Found the specific issue: `SelectDateWidget.value_from_datadict` method in `django/forms/widgets.py` at line 1159 calls `datetime.date(int(y), int(m), int(d))` without handling `OverflowError`
+
+2. Alternative action could have been to examine the full form validation pipeline, but focusing on the widget was the right approach
+
+3. Next action: Examine the current error handling in the method to understand what should happen when `OverflowError` occurs
+</observation>
+
+### 🎯 Action
+view_file_content({'file_name': 'django/forms/widgets.py', 'view_range': [1149, 1165]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Perfect! Now I can see the current implementation clearly. The method already has a try-except block that catches `ValueError` and handles it by returning a pseudo-ISO date string. This is the correct pattern. However, it doesn't catch `OverflowError`, which can occur when the integer values are too large for `datetime.date()` to handle.
+
+The fix is straightforward - we need to also catch `OverflowError` and handle it the same way as `ValueError`. This would be consistent with the existing error handling pattern.
+
+Now I have all the information I need to provide the final issue analysis.
+
+### 📋 Conclusion
+<observation>
+
+1. Found the current error handling: The method catches `ValueError` and returns a pseudo-ISO date string, but doesn't catch `OverflowError`
+
+2. Alternative action could have been to check what other similar widgets do, but the existing pattern is clear
+
+3. Next action: Provide comprehensive issue analysis with all the findings
+</observation>
+
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "SelectDateWidget.value_from_datadict crashes with OverflowError when user provides extremely large year values (larger than sys.maxsize) instead of gracefully handling the error and returning a validation error"
+    - status: "yes"
+  </problem_statement>
+  <root_cause>
+    - The root cause is in the SelectDateWidget.value_from_datadict method at line 1159 of django/forms/widgets.py. The method calls datetime.date(int(y), int(m), int(d)) within a try-except block that only catches ValueError but does not handle OverflowError. When extremely large integer values are passed (larger than sys.maxsize), the datetime.date constructor raises an OverflowError which is not caught, causing the server to crash with a 500 error instead of gracefully handling the invalid input.
+  </root_cause>
+  <current_behavior>
+    - The SelectDateWidget.value_from_datadict method in django/forms/widgets.py (lines 1149-1165) currently extracts year, month, and day values from user input and attempts to create a datetime.date object. 
+    - It has a try-except block that catches ValueError exceptions (e.g., when creating datetime.date(2017, 13, 32)) and returns a pseudo-ISO date string like "2017-13-32".
+    - However, it does not catch OverflowError exceptions that occur when int(y), int(m), or int(d) are too large for datetime.date() to handle (specifically when values exceed sys.maxsize).
+    - When an OverflowError occurs, it propagates up the call stack and results in a 500 Internal Server Error instead of being handled gracefully through Django's form validation system.
+    - The existing error handling pattern for ValueError shows the intended behavior - return a malformed date string that will be handled by the form validation system later.
+  </current_behavior>
+  <expected_behavior>
+    - The SelectDateWidget.value_from_datadict method should catch both ValueError and OverflowError exceptions when attempting to create datetime.date objects.
+    - When either exception occurs, the method should return a pseudo-ISO date string (e.g., "1234567821345678-1-1") following the same pattern as the existing ValueError handling.
+    - This allows the form validation system to process the invalid date through the normal validation pipeline, which will ultimately result in a ValidationError being raised with an appropriate user-friendly error message.
+    - The fix should be minimal and consistent with the existing error handling pattern - simply adding OverflowError to the except clause alongside ValueError.
+    - Users should see a proper validation error message instead of experiencing a server crash, maintaining the expected behavior of Django's form validation system.
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 1>
+
+<problem_decoder 2>
+## Step 1
+
+### 🤔 Thinking
+Let me start by understanding the issue described in the issue_description.
+
+The issue is about a `SelectDateWidget` that can crash with an `OverflowError`. 
+
+Looking at the problem:
+
+1. A user can trigger a server crash by visiting a URL with very large date values
+
+2. The crash happens in the `SelectDateWidget.value_from_datadict` method
+
+3. The specific error is: `OverflowError: signed integer is greater than maximum`
+
+4. This happens when trying to create a `datetime.date` object with very large integer values
+
+Let me start by exploring the repository structure to understand the codebase better.
+
+### 👁️ Observation
+I'll help you analyze this issue. Let me start by exploring the repository structure to understand the codebase and locate the relevant files.
+
+### 🎯 Action
+view_directory({'dir_path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Great! I can see this is a Django repository. The issue is about `SelectDateWidget` which would be in the `django/forms/` directory. Let me explore the forms directory structure to find the relevant files.
+
+### 👁️ Observation
+<observation>
+
+1. Found this is a Django repository with standard Django structure
+
+2. Alternative action could have been to search for "SelectDateWidget" directly
+
+3. Next action: Explore the forms directory where the SelectDateWidget would be located
+</observation>
+
+### 🎯 Action
+view_directory({'dir_path': './django/forms/'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I can see that there's a `widgets.py` file in the forms directory. This is likely where the `SelectDateWidget` is defined. The issue mentions a stack trace pointing to `widgets.py`, specifically line 1160 in the `value_from_datadict` method. Let me search for the SelectDateWidget class first.
+
+### 👁️ Observation
+<observation>
+
+1. Found the Django forms directory structure with widgets.py file
+
+2. Alternative action could have been to search for "SelectDateWidget" keyword across all files
+
+3. Next action: Search for SelectDateWidget in the widgets.py file and examine its implementation
+</observation>
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/', 'keywords': ['SelectDateWidget']})
+
+
+## Step 4
+
+### 🤔 Thinking
+Great! I found the SelectDateWidget is defined in `./django/forms/widgets.py` starting from line 50 to 
+1010. Let me examine this file to understand the implementation, particularly focusing on the `value_from_datadict` method mentioned in the error.
+
+### 👁️ Observation
+<observation>
+
+1. Found SelectDateWidget is defined in ./django/forms/widgets.py from line 50 to 1010
+
+2. Alternative action could have been to search for "value_from_datadict" method specifically
+
+3. Next action: Examine the widgets.py file to find the problematic value_from_datadict method
+</observation>
+
+### 🎯 Action
+view_file_content({'file_name': './django/forms/widgets.py', 'view_range': [1150, 1170]})
+
+
+## Step 5
+
+### 🤔 Thinking
+Perfect! I found the problematic code. At line 1159, there's the exact line mentioned in the error:
+
+
+
+```python
+date_value = datetime.date(int(y), int(m), int(d))
+
+
+```
+
+The issue is that this code catches `ValueError` exceptions (line 1160) but doesn't catch `OverflowError` exceptions, which can occur when the integer values are too large to convert to a C long.
+
+Let me look at more of this method to understand the full context and also find where this method is defined (what class it belongs to).
+
+### 👁️ Observation
+<observation>
+
+1. Found the exact problematic code at line 1159 in the value_from_datadict method
+
+2. The code only catches ValueError but not OverflowError when creating datetime.date
+
+3. Next action: Find the full context of this method and understand which class it belongs to
+</observation>
+
+### 🎯 Action
+view_file_content({'file_name': './django/forms/widgets.py', 'view_range': [1130, 1170]})
+
+
+## Step 6
+
+### 🤔 Thinking
+Now I need to find the class definition for this method. Let me look for the SelectDateWidget class definition.
+
+### 👁️ Observation
+<observation>
+
+1. Found the full value_from_datadict method starting at line 1149
+
+2. The method only catches ValueError but not OverflowError
+
+3. Next action: Find the SelectDateWidget class definition to understand the complete context
+</observation>
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/widgets.py', 'keywords': ['class SelectDateWidget']})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me search more broadly for the SelectDateWidget class definition.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/widgets.py', 'keywords': ['SelectDateWidget\\(']})
+
+
+## Step 8
+
+### 🤔 Thinking
+Let me try searching for SelectDateWidget without the regex pattern.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/widgets.py', 'keywords': ['SelectDateWidget']})
+
+
+## Step 9
+
+### 🤔 Thinking
+That's odd. Let me try searching for SelectDateWidget directly in the file to see what line it's on.
+
+### 🎯 Action
+view_file_content({'file_name': './django/forms/widgets.py', 'view_range': [1080, 1130]})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me search for the class definition by looking earlier in the file, around line 1000.
+
+### 🎯 Action
+view_file_content({'file_name': './django/forms/widgets.py', 'view_range': [1000, 1050]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Perfect! Now I found the SelectDateWidget class definition starting at line 
+1010. Let me also check the imports at the top of the file to understand the full context.
+
+### 👁️ Observation
+<observation>
+
+1. Found the SelectDateWidget class definition at line 1010
+
+2. It extends the Widget base class
+
+3. Next action: Check the imports at the top of the file to understand the complete context
+</observation>
+
+### 🎯 Action
+view_file_content({'file_name': './django/forms/widgets.py', 'view_range': [1, 50]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Now I have a complete understanding of the issue. Let me also check if there are any tests related to this widget to understand the expected behavior.
+
+### 👁️ Observation
+<observation>
+
+1. Found the imports and __all__ list which includes SelectDateWidget
+
+2. The datetime module is imported at line 6
+
+3. Next action: Search for tests related to SelectDateWidget to understand expected behavior
+</observation>
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/', 'keywords': ['SelectDateWidget']})
+
+
+## Step 13
+
+### 🤔 Thinking
+Perfect! There are tests for SelectDateWidget. Let me look at the test file to understand the expected behavior better.
+
+### 👁️ Observation
+<observation>
+
+1. Found tests for SelectDateWidget in multiple files
+
+2. The main test file is `./tests/forms_tests/widget_tests/test_selectdatewidget.py`
+
+3. Next action: Examine the test file to understand the expected behavior and edge cases
+</observation>
+
+### 🎯 Action
+view_file_content({'file_name': './tests/forms_tests/widget_tests/test_selectdatewidget.py', 'view_range': [1, 50]})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me search for any existing tests that might be related to handling invalid or large values.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/forms_tests/widget_tests/test_selectdatewidget.py', 'keywords': ['value_from_datadict', 'OverflowError', 'ValueError', 'large', 'overflow']})
+
+
+## Step 15
+
+### 🤔 Thinking
+Let me search for tests that might involve date validation or error handling.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/forms_tests/widget_tests/test_selectdatewidget.py', 'keywords': ['test_.*invalid', 'test_.*error', 'test_.*exception']})
+
+
+## Step 16
+
+### 🤔 Thinking
+Let me look at the general_root_cause_analysis_steps from the development knowledge to ensure I'm covering all necessary aspects:
+
+
+1. Identify input handling patterns in form widget code ✓
+
+2. Trace data flow through widget rendering process ✓  
+
+3. Analyze type handling and conversion logic ✓
+
+4. Review exception handling patterns ✓
+
+5. Test with different input types (datetime.date, string, None) - I should look for existing tests
+
+6. Verify behavior with edge cases (invalid dates) - I should look for existing tests  
+
+7. Check component interactions with form system ✓
+
+Let me look for tests that involve invalid dates or edge cases.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/forms_tests/widget_tests/test_selectdatewidget.py', 'keywords': ['invalid']})
+
+
+## Step 17
+
+### 🤔 Thinking
+Let me search for tests that involve date validation.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/forms_tests/widget_tests/test_selectdatewidget.py', 'keywords': ['test_.*date']})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me look at the actual test methods to understand how the widget is being tested.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/forms_tests/widget_tests/test_selectdatewidget.py', 'keywords': ['def test_']})
+
+
+## Step 19
+
+### 🤔 Thinking
+Let me try a different approach and view more of the test file to understand the test structure.
+
+### 🎯 Action
+view_file_content({'file_name': './tests/forms_tests/widget_tests/test_selectdatewidget.py', 'view_range': [600, 642]})
+
+
+## Step 20
+
+### 🤔 Thinking
+Perfect! I found the test for `value_from_datadict`. Looking at the test on line 603-622, I can see that it tests various cases but doesn't test the case with very large integers that would cause an OverflowError. The tests only check normal cases and cases with empty/None values.
+
+Now let me check if I need to examine how the repository agent could help me understand more about this issue.
+
+### 👁️ Observation
+<observation>
+
+1. Found the test for value_from_datadict method (line 603-622)
+
+2. Tests don't cover the case with very large integers that cause OverflowError
+
+3. Next action: Ask repository agent for broader context about this issue and similar patterns in Django
+</observation>
+
+### 🎯 Action
+ask_repository_agent({'query': 'What are common patterns in Django for handling OverflowError when converting user input to integers, particularly in form widgets? Are there similar issues or fixes in the codebase?'})
+
+
+## Step 21
+
+### 🤔 Thinking
+The repository agent provided useful context about Django's patterns for handling numeric input validation. It confirms that Django typically uses `ValidationError` for invalid input rather than letting underlying exceptions like `OverflowError` propagate. This reinforces my understanding that the issue is indeed that the SelectDateWidget doesn't follow this pattern.
+
+Now let me check the `involved_components` and `relevant_architecture` from the development knowledge to make sure I'm not missing anything important.
+
+Based on the development knowledge:
+- Primary: Type Handling Error ✓
+- Secondary: Input Validation Bug ✓  
+- Involved components: Django Forms System, newforms subsystem, extras module, widgets component ✓
+- Relevant architecture: Forms System Layer, Data Flow, Widget Architecture ✓
+
+I think I have enough information to provide a comprehensive analysis. Let me also check if there are any similar patterns in the Django codebase by searching for similar exception handling patterns.
+
+### 👁️ Observation
+<observation>
+
+1. Repository agent confirmed Django typically uses ValidationError for invalid input rather than letting exceptions propagate
+
+2. This confirms the issue is that SelectDateWidget doesn't follow standard Django patterns
+
+3. Next action: Search for similar exception handling patterns in Django to understand the proper approach
+</observation>
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/', 'keywords': ['except.*OverflowError', 'except.*ValueError.*OverflowError', 'except.*(ValueError|OverflowError)']})
+
+
+## Step 22
+
+### 🤔 Thinking
+Excellent! I found that there's already a pattern in Django form fields for handling `OverflowError`. Let me check line 568 in fields.py to see how it's handled.
+
+### 👁️ Observation
+<observation>
+
+1. Found existing patterns for handling OverflowError in Django forms
+
+2. Line 568 in fields.py has a specific example of OverflowError handling
+
+3. Next action: Examine the OverflowError handling pattern in fields.py
+</observation>
+
+### 🎯 Action
+view_file_content({'file_name': './django/forms/fields.py', 'view_range': [560, 580]})
+
+
+## Step 23
+
+### 🤔 Thinking
+Perfect! This shows the exact pattern that should be used in Django forms for handling OverflowError. The `DurationField` catches `OverflowError` and raises a `ValidationError` with an appropriate error message and code. This is the proper Django pattern.
+
+Now I have a complete understanding of the issue. Let me compile my analysis.
+
+### 👁️ Observation
+<observation>
+
+1. Found the proper Django pattern for handling OverflowError in DurationField
+
+2. It catches OverflowError and raises ValidationError with appropriate error message
+
+3. Next action: Complete the issue analysis with all gathered information
+</observation>
+
+### 🎯 Action
+think({'thought': "Based on my exploration, I now have a complete understanding of the issue:\n\n
+1. PROBLEM: The SelectDateWidget's value_from_datadict method only catches ValueError but not OverflowError when creating datetime.date objects from user input. This causes server crashes when users provide extremely large integer values.\n\n
+2. ROOT CAUSE: In ./django/forms/widgets.py line 1159, the code calls `datetime.date(int(y), int(m), int(d))` inside a try-except block that only catches ValueError, but not OverflowError.\n\n
+3. CURRENT BEHAVIOR: When users provide large integers (larger than sys.maxsize), the datetime.date constructor raises OverflowError, which is not caught, causing the server to crash.\n\n
+4. EXPECTED BEHAVIOR: Following Django's standard pattern (like in DurationField), the widget should catch both ValueError and OverflowError and handle them gracefully, likely by returning a pseudo-ISO date string format like it does for ValueError.\n\n
+5. SOLUTION: Modify the exception handling in the value_from_datadict method to catch both ValueError and OverflowError, following the existing pattern used elsewhere in Django forms.\n\nThe fix should be simple but important for security and stability."})
+
+
+## Step 24
+
+### 🤔 Thinking
+Now I have all the information needed to provide a comprehensive issue analysis. Let me structure this according to the requested format.
+
+### 📋 Conclusion
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "The SelectDateWidget in Django forms can crash with an OverflowError when users provide extremely large integer values for year, month, or day fields. This happens because the widget's value_from_datadict method only catches ValueError but not OverflowError when creating datetime.date objects from user input, allowing the OverflowError to propagate and crash the server."
+    - status: "yes"
+  </problem_statement>
+  <root_cause>
+    - Root cause: The issue is located in `./django/forms/widgets.py` at line 1159 within the `SelectDateWidget.value_from_datadict` method. The code attempts to create a `datetime.date` object with `datetime.date(int(y), int(m), int(d))` inside a try-except block that only catches `ValueError` (line 1160) but not `OverflowError`. When users provide extremely large integer values (larger than `sys.maxsize`), the `datetime.date` constructor raises an `OverflowError` which is not caught, causing the server to crash instead of being handled gracefully.
+  </root_cause>
+  <current_behavior>
+    - Current behavior: In `./django/forms/widgets.py`, the `SelectDateWidget` class (lines 1010-1171) implements the `value_from_datadict` method (lines 1149-1165) that processes user input for date fields. When all three date components (year, month, day) are provided, the method attempts to create a `datetime.date` object (line 1159). The method only catches `ValueError` exceptions (line 1160) and returns a pseudo-ISO date format string like "2017-0-23" for invalid dates. However, it does not catch `OverflowError` exceptions, which occur when integer values exceed the maximum size that can be converted to a C long. This allows the `OverflowError` to propagate up, causing an unhandled server error that crashes the application.
+  </current_behavior>
+  <expected_behavior>
+    - Expected behavior: The `SelectDateWidget.value_from_datadict` method should follow Django's standard pattern for handling numeric input validation by catching both `ValueError` and `OverflowError` exceptions. This pattern is demonstrated in `./django/forms/fields.py` line 568 where the `DurationField` catches `OverflowError` and raises a `ValidationError`. The widget should gracefully handle extremely large integer values by treating them the same way as invalid dates, returning a pseudo-ISO date format string (e.g., "1234567821345678-1-1") instead of crashing. This would maintain consistency with the existing behavior for other invalid date inputs while preventing server crashes and potential security vulnerabilities.
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 2>
+
+<solution_mapper 0>
+## Step 1
+
+### 🤔 Thinking
+Looking at this issue, I need to:
+
+
+1. First, explore the repository to understand the structure and find the relevant files
+
+2. Reproduce the issue
+
+3. Analyze the fix based on the principles provided
+
+Let me start by exploring the repository structure and understanding the problem better.
+
+The issue is about SelectDateWidget in Django forms that crashes with OverflowError when users provide extremely large integer values. The problem is in django/forms/widgets.py at line 1160 where it tries to create a datetime.date object but only catches ValueError, not OverflowError.
+
+Let me start exploring the repository.
+
+### 👁️ Observation
+I'll help you map a solution to the SelectDateWidget OverflowError issue. Let me start by exploring the repository structure and understanding the problem in detail.
+
+## 
+1. EXPLORATION
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Good, I can see this is a Django repository. Let me now look at the forms directory since the issue is about SelectDateWidget in django/forms/widgets.py.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I can see the widgets.py file. Now let me examine the specific file mentioned in the issue to understand the problem better.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/widgets.py', 'view_range': [1150, 1170]})
+
+
+## Step 4
+
+### 🤔 Thinking
+Great! I can see the exact problem on line 1159-
+1160. The code is trying to create a datetime.date object and only catching ValueError, but not OverflowError. Let me examine the broader context of this SelectDateWidget class.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/widgets.py', 'keywords': ['class SelectDateWidget', 'value_from_datadict']})
+
+
+## Step 5
+
+### 🤔 Thinking
+Let me try a different approach to search for the SelectDateWidget class in the file.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/widgets.py', 'keywords': ['SelectDateWidget']})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me examine the widgets.py file more broadly to understand the structure and find the SelectDateWidget class.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/widgets.py', 'view_range': [1000, 1050]})
+
+
+## Step 7
+
+### 🤔 Thinking
+Perfect! I found the SelectDateWidget class starting at line 
+1010. Let me look at the value_from_datadict method more closely.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/widgets.py', 'view_range': [1140, 1170]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Now let me look at the import section at the top of the file to understand what modules are being imported, and also examine the broader context to understand the full implementation.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/widgets.py', 'view_range': [1, 30]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Great! I can see that datetime is imported at line 
+6. Now let me also search for other examples of OverflowError handling in the codebase to understand the patterns Django uses. Based on the issue analysis, there should be a similar pattern in DurationField.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/fields.py', 'keywords': ['OverflowError', 'DurationField']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me look at the fields.py file to see if I can find the DurationField pattern mentioned in the issue analysis.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/fields.py', 'view_range': [560, 580]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Perfect! I found the DurationField pattern at line 
+568. This shows that Django handles OverflowError by catching it and raising ValidationError with an appropriate error message. Let me look at the DurationField class definition to understand it better.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/fields.py', 'view_range': [550, 580]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Now I understand the pattern! In the DurationField, when OverflowError occurs, it catches it and raises ValidationError. However, in the SelectDateWidget, the approach is different - it catches ValueError and returns a pseudo-ISO date format string instead of raising a ValidationError.
+
+Let me now check if there are any existing tests for SelectDateWidget to understand how the test structure works.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/forms_tests'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Perfect! I can see there's a specific test file for SelectDateWidget: `test_selectdatewidget.py`. Let me examine this file to understand the testing structure.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/forms_tests/widget_tests/test_selectdatewidget.py'})
+
+
+## Step 14
+
+### 🤔 Thinking
+Great! I can see the test file. Now I notice that there's a test case on lines 603-622 called `test_value_from_datadict` which tests the `value_from_datadict` method. However, looking at the test cases, none of them test for overflow scenarios. This confirms what was mentioned in the issue analysis - there are no tests for overflow cases.
+
+Now let me look at the base test class to understand the testing framework.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/forms_tests/widget_tests/base.py'})
+
+
+## Step 15
+
+### 🤔 Thinking
+Now I understand the testing framework. Let me now search for any other cases where OverflowError is handled in the Django codebase to understand the patterns.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['OverflowError']})
+
+
+## Step 16
+
+### 🤔 Thinking
+Perfect! I found several places where OverflowError is handled. I already know about the one in fields.py at line 568 (DurationField). Let me also check one of the others to see the pattern.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/template/defaultfilters.py', 'view_range': [160, 175]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Good! I can see another pattern where OverflowError is caught alongside ValueError. Now let me also check the ask_repository_agent to get more context about Django's form validation architecture.
+
+### 🎯 Action
+ask_repository_agent({'query': "How does Django's form validation work with widgets and how should widgets handle invalid input that causes system exceptions like OverflowError?"})
+
+
+## Step 18
+
+### 🤔 Thinking
+This is very informative! However, it seems like the repository agent might not be fully aware of the specific pattern in SelectDateWidget. The issue is that the SelectDateWidget has its own `value_from_datadict` method that's calling `datetime.date()` directly and only catching ValueError. Let me ask a more specific question about this.
+
+### 🎯 Action
+ask_repository_agent({'query': "How does the SelectDateWidget's value_from_datadict method work and what is its role in the form validation process?"})
+
+
+## Step 19
+
+### 🤔 Thinking
+This is very helpful! Now I understand the complete picture. The SelectDateWidget's `value_from_datadict` method is trying to create a `datetime.date` object to validate the input and format it correctly. If it succeeds, it returns the formatted date string. If it fails with a ValueError, it returns a pseudo-ISO date format.
+
+However, the issue is that it's not handling OverflowError, which can occur when the integer values are too large to be converted to a C long.
+
+Now I have enough information to proceed with the solution. Let me create a reproduction script first.
+
+### 👁️ Observation
+## 
+2. REPRODUCTION
+
+Let me create a minimal reproduction script to confirm the issue:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './reproduction.py', 'file_text': '#!/usr/bin/env python\n"""\nReproduction script for SelectDateWidget OverflowError issue.\n"""\n\nimport sys\nimport os\n\n# Add the current directory to Python path so we can import Django\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n\n# Configure Django settings (minimal setup)\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY=\'dummy-secret-key-for-testing\',\n        INSTALLED_APPS=[\n            \'django.contrib.auth\',\n            \'django.contrib.contenttypes\',\n        ],\n        USE_L10N=True,\n        USE_TZ=True,\n    )\n\ndjango.setup()\n\nfrom django import forms\nfrom django.forms import SelectDateWidget\nfrom django.http import HttpResponse\n\ndef test_overflow_error():\n    """Test that reproduces the OverflowError issue"""\n    \n    print("Testing SelectDateWidget OverflowError...")\n    \n    class ReproForm(forms.Form):\n        my_date = forms.DateField(widget=SelectDateWidget())\n    \n    # This should trigger the OverflowError\n    test_data = {\n        \'my_date_day\': \'1\',\n        \'my_date_month\': \'1\', \n        \'my_date_year\': \'1234567821345678\'  # This is too large for sys.maxsize\n    }\n    \n    try:\n        form = ReproForm(test_data)\n        print("Form created successfully")\n        \n        # This should trigger the OverflowError in value_from_datadict\n        is_valid = form.is_valid()\n        print(f"Form is_valid: {is_valid}")\n        \n        if not is_valid:\n            print(f"Form errors: {form.errors}")\n            \n    except OverflowError as e:\n        print(f"OverflowError caught: {e}")\n        print("This confirms the issue!")\n        return True\n    except Exception as e:\n        print(f"Unexpected error: {type(e).__name__}: {e}")\n        return False\n    \n    print("No OverflowError was triggered - this is unexpected!")\n    return False\n\ndef test_value_from_datadict_directly():\n    """Test the widget\'s value_from_datadict method directly"""\n    \n    print("\\nTesting SelectDateWidget.value_from_datadict directly...")\n    \n    widget = SelectDateWidget()\n    \n    # Test data that should cause OverflowError\n    test_data = {\n        \'my_date_day\': \'1\',\n        \'my_date_month\': \'1\', \n        \'my_date_year\': \'1234567821345678\'  # This is too large for sys.maxsize\n    }\n    \n    try:\n        result = widget.value_from_datadict(test_data, {}, \'my_date\')\n        print(f"value_from_datadict result: {result}")\n        print("No OverflowError was triggered - this is unexpected!")\n        return False\n    except OverflowError as e:\n        print(f"OverflowError caught: {e}")\n        print("This confirms the issue!")\n        return True\n    except Exception as e:\n        print(f"Unexpected error: {type(e).__name__}: {e}")\n        return False\n\nif __name__ == "__main__":\n    print("=" * 60)\n    print("SelectDateWidget OverflowError Reproduction Script")\n    print("=" * 60)\n    \n    # Test both methods\n    overflow_in_form = test_overflow_error()\n    overflow_in_widget = test_value_from_datadict_directly()\n    \n    print("\\n" + "=" * 60)\n    print("SUMMARY:")\n    print(f"OverflowError in form validation: {overflow_in_form}")\n    print(f"OverflowError in widget method: {overflow_in_widget}")\n    \n    if overflow_in_form or overflow_in_widget:\n        print("SUCCESS: OverflowError reproduced!")\n        sys.exit(0)\n    else:\n        print("FAILURE: Could not reproduce OverflowError")\n        sys.exit(1)'})
+
+
+## Step 20
+
+### 🤔 Thinking
+Now let me run the reproduction script to confirm the issue.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 21
+
+### 🤔 Thinking
+Perfect! I've successfully reproduced the issue. The OverflowError is being triggered in both the form validation and the direct widget method call. This confirms that the problem is exactly as described in the issue.
+
+Now let me proceed with the FIX ANALYSIS phase.
+
+### 👁️ Observation
+<observation>
+
+1. Successfully reproduced the OverflowError issue in both the form validation process and the widget's value_from_datadict method directly
+
+2. The error occurs when extremely large integer values (larger than sys.maxsize) are provided as year, month, or day values
+
+3. Alternative action could have been to create a more comprehensive reproduction script testing edge cases
+
+4. Next action: Proceed with fix analysis and solution design
+</observation>
+
+## 
+3. FIX ANALYSIS
+
+### 🎯 Action
+think({'thought': 'Now I need to analyze the root cause and design a fix following the principles provided:\n\n**Root Cause Analysis:**\nThe issue is located in django/forms/widgets.py at line 1159 in the SelectDateWidget.value_from_datadict method. The method tries to create a datetime.date object using `datetime.date(int(y), int(m), int(d))` but only catches ValueError, not OverflowError.\n\n**Current Pattern:**\n```python\ntry:\n    date_value = datetime.date(int(y), int(m), int(d))\nexcept ValueError:\n    # Return pseudo-ISO dates with zeros for any unselected values,\n    # e.g. \'2017-0-23\'.\n    return "%s-%s-%s" % (y or 0, m or 0, d or 0)\n```\n\n**Solution Design Following Principles:**\n\n
+1. **Minimal Viable Change**: The fix should be surgical - just add OverflowError to the existing except clause\n
+2. **Follow Existing Code Patterns**: I found that Django already handles OverflowError in similar contexts:\n   - In DurationField (fields.py:568) - catches OverflowError and converts to ValidationError\n   - In template filters (defaultfilters.py:168) - catches OverflowError alongside ValueError\n
+3. **Preserve Existing Interfaces**: The fix should maintain the same return behavior as the current ValueError handling\n
+4. **Most Direct Solution**: Simply adding OverflowError to the existing except clause\n\n**Why This Approach:**\n- The SelectDateWidget follows a different pattern than regular fields - it doesn\'t raise ValidationError, instead it returns a pseudo-ISO date format string that gets handled later in the validation pipeline\n- The existing ValueError handling already returns `"%s-%s-%s" % (y or 0, m or 0, d or 0)` which is exactly what we want for OverflowError too\n- This maintains consistency with the existing behavior and doesn\'t break any existing functionality\n\n**The Fix:**\nChange the except clause from:\n```python\nexcept ValueError:\n```\nto:\n```python\nexcept (ValueError, OverflowError):\n```\n\nThis is the most minimal, direct fix that follows Django\'s existing patterns and maintains all existing interfaces.'})
+
+
+## Step 22
+
+### 🤔 Thinking
+The analysis is clear. Now let me provide the final code change plan.
+
+### 📋 Conclusion
+<code_change_plan>
+The issue is caused by the SelectDateWidget's value_from_datadict method only catching ValueError but not OverflowError when creating datetime.date objects. When users provide extremely large integer values (larger than sys.maxsize) for date components, the datetime.date constructor raises OverflowError instead of ValueError, which propagates uncaught and crashes the server.
+
+The root cause is located in django/forms/widgets.py at line 1160 where `datetime.date(int(y), int(m), int(d))` is called within a try-except block that only catches ValueError.
+
+**Fix Analysis:**
+The solution follows Django's established pattern of handling OverflowError alongside ValueError in similar contexts (as seen in DurationField and template filters). The fix is minimal and surgical - simply adding OverflowError to the existing except clause to ensure the same pseudo-ISO date format handling is applied to overflow cases.
+
+**Reasoning:**
+
+1. **Minimal Viable Change**: Only modifies the exact location where the problem occurs
+
+2. **Follows Existing Code Patterns**: Consistent with how Django handles OverflowError in other parts of the codebase
+
+3. **Preserves Existing Interfaces**: Maintains the same return behavior and data flow
+
+4. **Most Direct Solution**: Simplest fix with clearest logic
+
+**Reproduction script directory:** `./reproduction.py`
+**Current script output:** OverflowError is raised, crashing the application
+**Expected output:** No OverflowError; the widget should return a pseudo-ISO date format string like "1234567821345678-1-1"
+
+./django/forms/widgets.py:
+- Change 1: Modify the except clause on line 1160 to catch both ValueError and OverflowError
+  Location: Line 1160 in the SelectDateWidget.value_from_datadict method
+  Change: `except ValueError:` → `except (ValueError, OverflowError):`
+  Reasoning: This ensures that when datetime.date() raises OverflowError due to extremely large integer values, it is handled the same way as ValueError - by returning a pseudo-ISO date format string that allows the validation to proceed through Django's normal form validation pipeline. This maintains consistency with the existing error handling pattern and follows Django's established practices for handling both ValueError and OverflowError together.
+</code_change_plan>
+</solution_mapper 0>
+
+<problem_solver 0>
+## Step 1
+
+### 🤔 Thinking
+Looking at this issue, I need to:
+
+
+1. First, explore the repository to understand the structure and find the relevant files
+
+2. Reproduce the issue
+
+3. Analyze the fix based on the principles provided
+
+Let me start by exploring the repository structure and understanding the problem better.
+
+The issue is about SelectDateWidget in Django forms that crashes with OverflowError when users provide extremely large integer values. The problem is in django/forms/widgets.py at line 1160 where it tries to create a datetime.date object but only catches ValueError, not OverflowError.
+
+Let me start exploring the repository.
+
+### 👁️ Observation
+I'll help you map a solution to the SelectDateWidget OverflowError issue. Let me start by exploring the repository structure and understanding the problem in detail.
+
+## 
+1. EXPLORATION
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Good, I can see this is a Django repository. Let me now look at the forms directory since the issue is about SelectDateWidget in django/forms/widgets.py.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I can see the widgets.py file. Now let me examine the specific file mentioned in the issue to understand the problem better.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/widgets.py', 'view_range': [1150, 1170]})
+
+
+## Step 4
+
+### 🤔 Thinking
+Great! I can see the exact problem on line 1159-
+1160. The code is trying to create a datetime.date object and only catching ValueError, but not OverflowError. Let me examine the broader context of this SelectDateWidget class.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/widgets.py', 'keywords': ['class SelectDateWidget', 'value_from_datadict']})
+
+
+## Step 5
+
+### 🤔 Thinking
+Let me try a different approach to search for the SelectDateWidget class in the file.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/widgets.py', 'keywords': ['SelectDateWidget']})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me examine the widgets.py file more broadly to understand the structure and find the SelectDateWidget class.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/widgets.py', 'view_range': [1000, 1050]})
+
+
+## Step 7
+
+### 🤔 Thinking
+Perfect! I found the SelectDateWidget class starting at line 
+1010. Let me look at the value_from_datadict method more closely.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/widgets.py', 'view_range': [1140, 1170]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Now let me look at the import section at the top of the file to understand what modules are being imported, and also examine the broader context to understand the full implementation.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/widgets.py', 'view_range': [1, 30]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Great! I can see that datetime is imported at line 
+6. Now let me also search for other examples of OverflowError handling in the codebase to understand the patterns Django uses. Based on the issue analysis, there should be a similar pattern in DurationField.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/forms/fields.py', 'keywords': ['OverflowError', 'DurationField']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me look at the fields.py file to see if I can find the DurationField pattern mentioned in the issue analysis.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/fields.py', 'view_range': [560, 580]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Perfect! I found the DurationField pattern at line 
+568. This shows that Django handles OverflowError by catching it and raising ValidationError with an appropriate error message. Let me look at the DurationField class definition to understand it better.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/fields.py', 'view_range': [550, 580]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Now I understand the pattern! In the DurationField, when OverflowError occurs, it catches it and raises ValidationError. However, in the SelectDateWidget, the approach is different - it catches ValueError and returns a pseudo-ISO date format string instead of raising a ValidationError.
+
+Let me now check if there are any existing tests for SelectDateWidget to understand how the test structure works.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/forms_tests'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Perfect! I can see there's a specific test file for SelectDateWidget: `test_selectdatewidget.py`. Let me examine this file to understand the testing structure.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/forms_tests/widget_tests/test_selectdatewidget.py'})
+
+
+## Step 14
+
+### 🤔 Thinking
+Great! I can see the test file. Now I notice that there's a test case on lines 603-622 called `test_value_from_datadict` which tests the `value_from_datadict` method. However, looking at the test cases, none of them test for overflow scenarios. This confirms what was mentioned in the issue analysis - there are no tests for overflow cases.
+
+Now let me look at the base test class to understand the testing framework.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/forms_tests/widget_tests/base.py'})
+
+
+## Step 15
+
+### 🤔 Thinking
+Now I understand the testing framework. Let me now search for any other cases where OverflowError is handled in the Django codebase to understand the patterns.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['OverflowError']})
+
+
+## Step 16
+
+### 🤔 Thinking
+Perfect! I found several places where OverflowError is handled. I already know about the one in fields.py at line 568 (DurationField). Let me also check one of the others to see the pattern.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/template/defaultfilters.py', 'view_range': [160, 175]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Good! I can see another pattern where OverflowError is caught alongside ValueError. Now let me also check the ask_repository_agent to get more context about Django's form validation architecture.
+
+### 🎯 Action
+ask_repository_agent({'query': "How does Django's form validation work with widgets and how should widgets handle invalid input that causes system exceptions like OverflowError?"})
+
+
+## Step 18
+
+### 🤔 Thinking
+This is very informative! However, it seems like the repository agent might not be fully aware of the specific pattern in SelectDateWidget. The issue is that the SelectDateWidget has its own `value_from_datadict` method that's calling `datetime.date()` directly and only catching ValueError. Let me ask a more specific question about this.
+
+### 🎯 Action
+ask_repository_agent({'query': "How does the SelectDateWidget's value_from_datadict method work and what is its role in the form validation process?"})
+
+
+## Step 19
+
+### 🤔 Thinking
+This is very helpful! Now I understand the complete picture. The SelectDateWidget's `value_from_datadict` method is trying to create a `datetime.date` object to validate the input and format it correctly. If it succeeds, it returns the formatted date string. If it fails with a ValueError, it returns a pseudo-ISO date format.
+
+However, the issue is that it's not handling OverflowError, which can occur when the integer values are too large to be converted to a C long.
+
+Now I have enough information to proceed with the solution. Let me create a reproduction script first.
+
+### 👁️ Observation
+## 
+2. REPRODUCTION
+
+Let me create a minimal reproduction script to confirm the issue:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './reproduction.py', 'file_text': '#!/usr/bin/env python\n"""\nReproduction script for SelectDateWidget OverflowError issue.\n"""\n\nimport sys\nimport os\n\n# Add the current directory to Python path so we can import Django\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n\n# Configure Django settings (minimal setup)\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY=\'dummy-secret-key-for-testing\',\n        INSTALLED_APPS=[\n            \'django.contrib.auth\',\n            \'django.contrib.contenttypes\',\n        ],\n        USE_L10N=True,\n        USE_TZ=True,\n    )\n\ndjango.setup()\n\nfrom django import forms\nfrom django.forms import SelectDateWidget\nfrom django.http import HttpResponse\n\ndef test_overflow_error():\n    """Test that reproduces the OverflowError issue"""\n    \n    print("Testing SelectDateWidget OverflowError...")\n    \n    class ReproForm(forms.Form):\n        my_date = forms.DateField(widget=SelectDateWidget())\n    \n    # This should trigger the OverflowError\n    test_data = {\n        \'my_date_day\': \'1\',\n        \'my_date_month\': \'1\', \n        \'my_date_year\': \'1234567821345678\'  # This is too large for sys.maxsize\n    }\n    \n    try:\n        form = ReproForm(test_data)\n        print("Form created successfully")\n        \n        # This should trigger the OverflowError in value_from_datadict\n        is_valid = form.is_valid()\n        print(f"Form is_valid: {is_valid}")\n        \n        if not is_valid:\n            print(f"Form errors: {form.errors}")\n            \n    except OverflowError as e:\n        print(f"OverflowError caught: {e}")\n        print("This confirms the issue!")\n        return True\n    except Exception as e:\n        print(f"Unexpected error: {type(e).__name__}: {e}")\n        return False\n    \n    print("No OverflowError was triggered - this is unexpected!")\n    return False\n\ndef test_value_from_datadict_directly():\n    """Test the widget\'s value_from_datadict method directly"""\n    \n    print("\\nTesting SelectDateWidget.value_from_datadict directly...")\n    \n    widget = SelectDateWidget()\n    \n    # Test data that should cause OverflowError\n    test_data = {\n        \'my_date_day\': \'1\',\n        \'my_date_month\': \'1\', \n        \'my_date_year\': \'1234567821345678\'  # This is too large for sys.maxsize\n    }\n    \n    try:\n        result = widget.value_from_datadict(test_data, {}, \'my_date\')\n        print(f"value_from_datadict result: {result}")\n        print("No OverflowError was triggered - this is unexpected!")\n        return False\n    except OverflowError as e:\n        print(f"OverflowError caught: {e}")\n        print("This confirms the issue!")\n        return True\n    except Exception as e:\n        print(f"Unexpected error: {type(e).__name__}: {e}")\n        return False\n\nif __name__ == "__main__":\n    print("=" * 60)\n    print("SelectDateWidget OverflowError Reproduction Script")\n    print("=" * 60)\n    \n    # Test both methods\n    overflow_in_form = test_overflow_error()\n    overflow_in_widget = test_value_from_datadict_directly()\n    \n    print("\\n" + "=" * 60)\n    print("SUMMARY:")\n    print(f"OverflowError in form validation: {overflow_in_form}")\n    print(f"OverflowError in widget method: {overflow_in_widget}")\n    \n    if overflow_in_form or overflow_in_widget:\n        print("SUCCESS: OverflowError reproduced!")\n        sys.exit(0)\n    else:\n        print("FAILURE: Could not reproduce OverflowError")\n        sys.exit(1)'})
+
+
+## Step 20
+
+### 🤔 Thinking
+Now let me run the reproduction script to confirm the issue.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 21
+
+### 🤔 Thinking
+Perfect! I've successfully reproduced the issue. The OverflowError is being triggered in both the form validation and the direct widget method call. This confirms that the problem is exactly as described in the issue.
+
+Now let me proceed with the FIX ANALYSIS phase.
+
+### 👁️ Observation
+<observation>
+
+1. Successfully reproduced the OverflowError issue in both the form validation process and the widget's value_from_datadict method directly
+
+2. The error occurs when extremely large integer values (larger than sys.maxsize) are provided as year, month, or day values
+
+3. Alternative action could have been to create a more comprehensive reproduction script testing edge cases
+
+4. Next action: Proceed with fix analysis and solution design
+</observation>
+
+## 
+3. FIX ANALYSIS
+
+### 🎯 Action
+think({'thought': 'Now I need to analyze the root cause and design a fix following the principles provided:\n\n**Root Cause Analysis:**\nThe issue is located in django/forms/widgets.py at line 1159 in the SelectDateWidget.value_from_datadict method. The method tries to create a datetime.date object using `datetime.date(int(y), int(m), int(d))` but only catches ValueError, not OverflowError.\n\n**Current Pattern:**\n```python\ntry:\n    date_value = datetime.date(int(y), int(m), int(d))\nexcept ValueError:\n    # Return pseudo-ISO dates with zeros for any unselected values,\n    # e.g. \'2017-0-23\'.\n    return "%s-%s-%s" % (y or 0, m or 0, d or 0)\n```\n\n**Solution Design Following Principles:**\n\n
+1. **Minimal Viable Change**: The fix should be surgical - just add OverflowError to the existing except clause\n
+2. **Follow Existing Code Patterns**: I found that Django already handles OverflowError in similar contexts:\n   - In DurationField (fields.py:568) - catches OverflowError and converts to ValidationError\n   - In template filters (defaultfilters.py:168) - catches OverflowError alongside ValueError\n
+3. **Preserve Existing Interfaces**: The fix should maintain the same return behavior as the current ValueError handling\n
+4. **Most Direct Solution**: Simply adding OverflowError to the existing except clause\n\n**Why This Approach:**\n- The SelectDateWidget follows a different pattern than regular fields - it doesn\'t raise ValidationError, instead it returns a pseudo-ISO date format string that gets handled later in the validation pipeline\n- The existing ValueError handling already returns `"%s-%s-%s" % (y or 0, m or 0, d or 0)` which is exactly what we want for OverflowError too\n- This maintains consistency with the existing behavior and doesn\'t break any existing functionality\n\n**The Fix:**\nChange the except clause from:\n```python\nexcept ValueError:\n```\nto:\n```python\nexcept (ValueError, OverflowError):\n```\n\nThis is the most minimal, direct fix that follows Django\'s existing patterns and maintains all existing interfaces.'})
+
+
+## Step 22
+
+### 🤔 Thinking
+The analysis is clear. Now let me provide the final code change plan.
+
+### 👁️ Observation
+<code_change_plan>
+The issue is caused by the SelectDateWidget's value_from_datadict method only catching ValueError but not OverflowError when creating datetime.date objects. When users provide extremely large integer values (larger than sys.maxsize) for date components, the datetime.date constructor raises OverflowError instead of ValueError, which propagates uncaught and crashes the server.
+
+The root cause is located in django/forms/widgets.py at line 1160 where `datetime.date(int(y), int(m), int(d))` is called within a try-except block that only catches ValueError.
+
+**Fix Analysis:**
+The solution follows Django's established pattern of handling OverflowError alongside ValueError in similar contexts (as seen in DurationField and template filters). The fix is minimal and surgical - simply adding OverflowError to the existing except clause to ensure the same pseudo-ISO date format handling is applied to overflow cases.
+
+**Reasoning:**
+
+1. **Minimal Viable Change**: Only modifies the exact location where the problem occurs
+
+2. **Follows Existing Code Patterns**: Consistent with how Django handles OverflowError in other parts of the codebase
+
+3. **Preserves Existing Interfaces**: Maintains the same return behavior and data flow
+
+4. **Most Direct Solution**: Simplest fix with clearest logic
+
+**Reproduction script directory:** `./reproduction.py`
+**Current script output:** OverflowError is raised, crashing the application
+**Expected output:** No OverflowError; the widget should return a pseudo-ISO date format string like "1234567821345678-1-1"
+
+./django/forms/widgets.py:
+- Change 1: Modify the except clause on line 1160 to catch both ValueError and OverflowError
+  Location: Line 1160 in the SelectDateWidget.value_from_datadict method
+  Change: `except ValueError:` → `except (ValueError, OverflowError):`
+  Reasoning: This ensures that when datetime.date() raises OverflowError due to extremely large integer values, it is handled the same way as ValueError - by returning a pseudo-ISO date format string that allows the validation to proceed through Django's normal form validation pipeline. This maintains consistency with the existing error handling pattern and follows Django's established practices for handling both ValueError and OverflowError together.
+</code_change_plan>
+
+
+## Step 23
+
+### 👁️ Observation
+Now I'll implement the fix based on the code change plan:
+
+## 
+1. FIX IMPLEMENTATION
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './django/forms/widgets.py', 'old_str': '            try:\n                date_value = datetime.date(int(y), int(m), int(d))\n            except ValueError:\n                # Return pseudo-ISO dates with zeros for any unselected values,\n                # e.g. \'2017-0-23\'.\n                return "%s-%s-%s" % (y or 0, m or 0, d or 0)', 'new_str': '            try:\n                date_value = datetime.date(int(y), int(m), int(d))\n            except (ValueError, OverflowError):\n                # Return pseudo-ISO dates with zeros for any unselected values,\n                # e.g. \'2017-0-23\'.\n                return "%s-%s-%s" % (y or 0, m or 0, d or 0)'})
+
+
+## Step 24
+
+### 🤔 Thinking
+Great! The fix has been implemented successfully. The except clause now catches both ValueError and OverflowError. Now I need to verify that the fix works.
+
+### 👁️ Observation
+<observation>
+
+1. Successfully implemented the fix by modifying the except clause in the SelectDateWidget.value_from_datadict method
+
+2. The change is minimal and surgical - only adding OverflowError to the existing except clause
+
+3. Alternative action could have been to create a more comprehensive exception handling solution
+
+4. Next action: Test the fix to ensure it works correctly
+</observation>
+
+## 
+2. VERIFICATION
+
+Let me test the fix by running the reproduction script again:
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 25
+
+### 🤔 Thinking
+Excellent! The fix is working correctly. The reproduction script shows that:
+
+
+1. **No OverflowError is triggered** - This is exactly what we wanted to achieve
+
+2. **The widget method returns the expected pseudo-ISO date format** - "1234567821345678-1-1"
+
+3. **Form validation produces an appropriate error message** - "Enter a valid date." instead of crashing with OverflowError
+
+The fix is working as expected. The SelectDateWidget now handles the OverflowError gracefully by returning a pseudo-ISO date format string (like "1234567821345678-1-1"), which allows the form validation to proceed through Django's normal pipeline and produce a user-friendly error message.
+
+Let me create a more comprehensive test to ensure the fix handles various edge cases correctly.
+
+### 👁️ Observation
+<observation>
+
+1. The fix works correctly - no OverflowError is triggered, and the widget returns the expected pseudo-ISO date format
+
+2. Form validation now produces appropriate error messages instead of crashing
+
+3. Alternative action could have been to add more comprehensive logging to track the behavior
+
+4. Next action: Create additional test cases to verify edge cases and ensure robustness
+</observation>
+
+Let me create a more comprehensive test to ensure the fix handles various edge cases:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './comprehensive_test.py', 'file_text': '#!/usr/bin/env python\n"""\nComprehensive test script for SelectDateWidget OverflowError fix.\n"""\n\nimport sys\nimport os\n\n# Add the current directory to Python path so we can import Django\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n\n# Configure Django settings (minimal setup)\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY=\'dummy-secret-key-for-testing\',\n        INSTALLED_APPS=[\n            \'django.contrib.auth\',\n            \'django.contrib.contenttypes\',\n        ],\n        USE_L10N=True,\n        USE_TZ=True,\n    )\n\ndjango.setup()\n\nfrom django import forms\nfrom django.forms import SelectDateWidget\n\ndef test_overflow_scenarios():\n    """Test various overflow scenarios"""\n    \n    print("Testing various overflow scenarios...")\n    \n    widget = SelectDateWidget()\n    \n    # Test cases that should cause overflow\n    test_cases = [\n        # (test_name, year, month, day, expected_result)\n        ("Large year", "1234567821345678", "1", "1", "1234567821345678-1-1"),\n        ("Large month", "2000", "1234567821345678", "1", "2000-1234567821345678-1"),\n        ("Large day", "2000", "1", "1234567821345678", "2000-1-1234567821345678"),\n        ("All large", "1234567821345678", "1234567821345678", "1234567821345678", "1234567821345678-1234567821345678-1234567821345678"),\n        ("Negative large", "-1234567821345678", "1", "1", "-1234567821345678-1-1"),\n    ]\n    \n    for test_name, year, month, day, expected_result in test_cases:\n        test_data = {\n            \'my_date_year\': year,\n            \'my_date_month\': month,\n            \'my_date_day\': day\n        }\n        \n        try:\n            result = widget.value_from_datadict(test_data, {}, \'my_date\')\n            print(f"✓ {test_name}: {result} (expected: {expected_result})")\n            \n            if result != expected_result:\n                print(f"  WARNING: Expected {expected_result}, got {result}")\n                \n        except Exception as e:\n            print(f"✗ {test_name}: Exception raised - {type(e).__name__}: {e}")\n    \n    print()\n\ndef test_normal_scenarios():\n    """Test that normal scenarios still work correctly"""\n    \n    print("Testing normal scenarios...")\n    \n    widget = SelectDateWidget()\n    \n    # Test cases that should work normally\n    test_cases = [\n        # (test_name, year, month, day, should_create_date)\n        ("Valid date", "2023", "12", "25", True),\n        ("Invalid date", "2023", "02", "30", False),  # Feb 30 doesn\'t exist\n        ("Empty strings", "", "", "", True),  # Should return None\n        ("Partial data", "2023", "12", "", False),  # Missing day\n    ]\n    \n    for test_name, year, month, day, should_create_date in test_cases:\n        test_data = {\n            \'my_date_year\': year,\n            \'my_date_month\': month,\n            \'my_date_day\': day\n        }\n        \n        try:\n            result = widget.value_from_datadict(test_data, {}, \'my_date\')\n            print(f"✓ {test_name}: {result}")\n            \n        except Exception as e:\n            print(f"✗ {test_name}: Exception raised - {type(e).__name__}: {e}")\n    \n    print()\n\ndef test_form_validation():\n    """Test form validation with overflow scenarios"""\n    \n    print("Testing form validation with overflow scenarios...")\n    \n    class TestForm(forms.Form):\n        my_date = forms.DateField(widget=SelectDateWidget())\n    \n    test_cases = [\n        # (test_name, year, month, day, should_be_valid)\n        ("Valid date", "2023", "12", "25", True),\n        ("Large year", "1234567821345678", "1", "1", False),\n        ("Large month", "2000", "1234567821345678", "1", False),\n        ("Large day", "2000", "1", "1234567821345678", False),\n        ("Invalid date", "2023", "02", "30", False),  # Feb 30 doesn\'t exist\n    ]\n    \n    for test_name, year, month, day, should_be_valid in test_cases:\n        test_data = {\n            \'my_date_year\': year,\n            \'my_date_month\': month,\n            \'my_date_day\': day\n        }\n        \n        try:\n            form = TestForm(test_data)\n            is_valid = form.is_valid()\n            \n            if is_valid == should_be_valid:\n                print(f"✓ {test_name}: {\'Valid\' if is_valid else \'Invalid\'} (as expected)")\n            else:\n                print(f"✗ {test_name}: {\'Valid\' if is_valid else \'Invalid\'} (expected {\'Valid\' if should_be_valid else \'Invalid\'})")\n                \n            if not is_valid:\n                print(f"  Errors: {form.errors}")\n                \n        except Exception as e:\n            print(f"✗ {test_name}: Exception raised - {type(e).__name__}: {e}")\n    \n    print()\n\nif __name__ == "__main__":\n    print("=" * 60)\n    print("Comprehensive SelectDateWidget OverflowError Fix Test")\n    print("=" * 60)\n    \n    test_overflow_scenarios()\n    test_normal_scenarios()\n    test_form_validation()\n    \n    print("=" * 60)\n    print("Test completed!")\n    print("=" * 60)'})
+
+
+## Step 26
+
+### 🤔 Thinking
+Let me run the comprehensive test to ensure the fix works correctly for various edge cases.
+
+### 🎯 Action
+bash({'command': 'cd . && python comprehensive_test.py'})
+
+
+## Step 27
+
+### 🤔 Thinking
+Perfect! The comprehensive test shows that our fix is working correctly:
+
+
+1. **All overflow scenarios are handled gracefully**: The widget returns the expected pseudo-ISO date format strings for overflow cases
+
+2. **Normal scenarios still work correctly**: Valid dates, invalid dates, empty strings, and partial data all work as expected
+
+3. **Form validation produces appropriate error messages**: All overflow scenarios result in proper validation errors with user-friendly messages instead of server crashes
+
+The fix is working as designed. Let me now run the existing Django tests to ensure we haven't broken anything.
+
+### 👁️ Observation
+<observation>
+
+1. Comprehensive testing shows the fix works correctly for all overflow scenarios, returning expected pseudo-ISO date formats
+
+2. Normal scenarios (valid dates, invalid dates, empty strings, partial data) continue to work as expected
+
+3. Form validation produces appropriate error messages for all overflow cases instead of crashing
+
+4. Next action: Run existing Django tests to ensure no regressions
+</observation>
+
+Let me run the existing Django tests for SelectDateWidget to ensure we haven't broken anything:
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest tests/forms_tests/widget_tests/test_selectdatewidget.py -xvs'})
+
+
+## Step 28
+
+### 🤔 Thinking
+Let me try running the tests using Django's test runner instead.
+
+### 🎯 Action
+bash({'command': 'cd . && python -m django test tests.forms_tests.widget_tests.test_selectdatewidget --settings=tests.test_sqlite'})
+
+
+## Step 29
+
+### 🤔 Thinking
+There's one test failure, but it's not related to our fix. It's a template-related issue (`forms_tests/use_fieldset.html` template not found) which is unrelated to our OverflowError fix.
+
+Let me try running just the test that's specifically for the value_from_datadict method, which is the one most relevant to our fix.
+
+### 🎯 Action
+bash({'command': 'cd . && python -m django test tests.forms_tests.widget_tests.test_selectdatewidget.SelectDateWidgetTest.test_value_from_datadict --settings=tests.test_sqlite'})
+
+
+## Step 30
+
+### 🤔 Thinking
+Excellent! The test_value_from_datadict test passes, which is the most relevant test for our fix. Let me run a few more specific tests to ensure our fix doesn't break anything.
+
+### 🎯 Action
+bash({'command': 'cd . && python -m django test tests.forms_tests.widget_tests.test_selectdatewidget.SelectDateWidgetTest.test_render_invalid_date --settings=tests.test_sqlite'})
+
+
+## Step 31
+
+### 🤔 Thinking
+Great! The test_render_invalid_date test also passes, which is another important test related to handling invalid dates. Let me run the localization test which also tests the value_from_datadict method.
+
+### 🎯 Action
+bash({'command': 'cd . && python -m django test tests.forms_tests.widget_tests.test_selectdatewidget.SelectDateWidgetTest.test_l10n --settings=tests.test_sqlite'})
+
+
+## Step 32
+
+### 🤔 Thinking
+Great! All the relevant tests are passing. The one test failure we saw earlier is unrelated to our fix - it's a template-related issue that seems to be a test configuration problem, not related to the SelectDateWidget functionality.
+
+Let me also run a broader test for form widgets to make sure our change doesn't break anything else.
+
+### 🎯 Action
+bash({'command': 'cd . && python -m django test tests.forms_tests.field_tests.test_datefield --settings=tests.test_sqlite'})
+
+
+## Step 33
+
+### 🤔 Thinking
+Perfect! All DateField tests pass, which confirms that our fix to the SelectDateWidget doesn't break the overall date field functionality.
+
+Let me now check if there are any other areas that might be affected by our change by running a broader test for forms.
+
+### 🎯 Action
+bash({'command': 'cd . && python -m django test tests.forms_tests.tests.test_forms --settings=tests.test_sqlite'})
+
+
+## Step 34
+
+### 🤔 Thinking
+The test failures are all related to template configuration issues and not related to our OverflowError fix. All the failures are about missing templates or template backend configurations. This is expected since we're running tests in an isolated environment without the full Django test configuration.
+
+The important thing is that our fix works correctly as demonstrated by our specific tests and the validation that we did earlier. The forms functionality is working properly.
+
+Let me also run one final verification test to ensure our fix works correctly with a complete example.
+
+### 👁️ Observation
+<observation>
+
+1. The test failures are all related to template configuration issues, not our OverflowError fix
+
+2. The core widget functionality tests (test_value_from_datadict, test_render_invalid_date, test_l10n) all pass
+
+3. DateField tests and other core forms tests work correctly
+
+4. Next action: Create a final verification test to ensure completeness
+</observation>
+
+Let me create a final verification test to ensure the complete fix works correctly:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './final_verification.py', 'file_text': '#!/usr/bin/env python\n"""\nFinal verification test for SelectDateWidget OverflowError fix.\n"""\n\nimport sys\nimport os\nimport datetime\n\n# Add the current directory to Python path so we can import Django\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n\n# Configure Django settings (minimal setup)\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY=\'dummy-secret-key-for-testing\',\n        INSTALLED_APPS=[\n            \'django.contrib.auth\',\n            \'django.contrib.contenttypes\',\n        ],\n        USE_L10N=True,\n        USE_TZ=True,\n    )\n\ndjango.setup()\n\nfrom django import forms\nfrom django.forms import SelectDateWidget\n\ndef test_original_issue():\n    """Test the exact scenario from the original issue"""\n    \n    print("Testing the original issue scenario...")\n    \n    class ReproForm(forms.Form):\n        my_date = forms.DateField(widget=SelectDateWidget())\n    \n    # This is the exact URL parameter from the issue\n    test_data = {\n        \'my_date_day\': \'1\',\n        \'my_date_month\': \'1\',\n        \'my_date_year\': \'1234567821345678\'\n    }\n    \n    try:\n        form = ReproForm(test_data)\n        print("✓ Form created successfully without OverflowError")\n        \n        is_valid = form.is_valid()\n        print(f"✓ Form validation completed: {\'Valid\' if is_valid else \'Invalid\'}")\n        \n        if not is_valid:\n            print(f"✓ Form errors: {form.errors}")\n            print("✓ Got expected validation error instead of server crash")\n            return True\n        else:\n            print("✗ Expected form to be invalid but it was valid")\n            return False\n            \n    except Exception as e:\n        print(f"✗ Exception raised: {type(e).__name__}: {e}")\n        return False\n\ndef test_widget_behavior():\n    """Test the widget behavior directly"""\n    \n    print("\\nTesting widget behavior...")\n    \n    widget = SelectDateWidget()\n    \n    # Test the exact scenario from the issue\n    test_data = {\n        \'my_date_day\': \'1\',\n        \'my_date_month\': \'1\',\n        \'my_date_year\': \'1234567821345678\'\n    }\n    \n    try:\n        result = widget.value_from_datadict(test_data, {}, \'my_date\')\n        expected = "1234567821345678-1-1"\n        \n        if result == expected:\n            print(f"✓ Widget returned expected result: {result}")\n            return True\n        else:\n            print(f"✗ Widget returned unexpected result: {result} (expected: {expected})")\n            return False\n            \n    except Exception as e:\n        print(f"✗ Exception raised: {type(e).__name__}: {e}")\n        return False\n\ndef test_normal_behavior_preserved():\n    """Test that normal behavior is preserved"""\n    \n    print("\\nTesting normal behavior preservation...")\n    \n    widget = SelectDateWidget()\n    \n    # Test normal valid date\n    test_data = {\n        \'my_date_day\': \'25\',\n        \'my_date_month\': \'12\',\n        \'my_date_year\': \'2023\'\n    }\n    \n    try:\n        result = widget.value_from_datadict(test_data, {}, \'my_date\')\n        \n        # Should return a properly formatted date string\n        try:\n            # Parse the result to ensure it\'s a valid date format\n            datetime.datetime.strptime(result, \'%Y-%m-%d\')\n            print(f"✓ Normal behavior preserved: {result}")\n            return True\n        except ValueError:\n            print(f"✗ Normal behavior broken: {result} is not a valid date format")\n            return False\n            \n    except Exception as e:\n        print(f"✗ Exception raised: {type(e).__name__}: {e}")\n        return False\n\ndef test_edge_cases():\n    """Test edge cases"""\n    \n    print("\\nTesting edge cases...")\n    \n    widget = SelectDateWidget()\n    \n    edge_cases = [\n        # (test_name, year, month, day, expected_behavior)\n        ("sys.maxsize", str(sys.maxsize), "1", "1", "should_work"),\n        ("sys.maxsize + 1", str(sys.maxsize + 1), "1", "1", "should_handle_overflow"),\n        ("Negative large", "-1234567821345678", "1", "1", "should_handle_overflow"),\n        ("Zero values", "0", "0", "0", "should_work"),\n        ("Empty strings", "", "", "", "should_return_none"),\n    ]\n    \n    success_count = 0\n    for test_name, year, month, day, expected_behavior in edge_cases:\n        test_data = {\n            \'my_date_year\': year,\n            \'my_date_month\': month,\n            \'my_date_day\': day\n        }\n        \n        try:\n            result = widget.value_from_datadict(test_data, {}, \'my_date\')\n            \n            if expected_behavior == "should_return_none" and result is None:\n                print(f"✓ {test_name}: Returned None as expected")\n                success_count += 1\n            elif expected_behavior == "should_work" and result is not None:\n                print(f"✓ {test_name}: Returned {result}")\n                success_count += 1\n            elif expected_behavior == "should_handle_overflow" and result is not None:\n                print(f"✓ {test_name}: Handled overflow, returned {result}")\n                success_count += 1\n            else:\n                print(f"✗ {test_name}: Unexpected result {result}")\n                \n        except Exception as e:\n            print(f"✗ {test_name}: Exception raised - {type(e).__name__}: {e}")\n    \n    return success_count == len(edge_cases)\n\nif __name__ == "__main__":\n    print("=" * 60)\n    print("Final Verification Test for SelectDateWidget OverflowError Fix")\n    print("=" * 60)\n    \n    results = []\n    results.append(test_original_issue())\n    results.append(test_widget_behavior())\n    results.append(test_normal_behavior_preserved())\n    results.append(test_edge_cases())\n    \n    print("\\n" + "=" * 60)\n    print("Final Results:")\n    print(f"Original issue test: {\'PASS\' if results[0] else \'FAIL\'}")\n    print(f"Widget behavior test: {\'PASS\' if results[1] else \'FAIL\'}")\n    print(f"Normal behavior test: {\'PASS\' if results[2] else \'FAIL\'}")\n    print(f"Edge cases test: {\'PASS\' if results[3] else \'FAIL\'}")\n    \n    if all(results):\n        print("\\n🎉 ALL TESTS PASSED! The fix is working correctly.")\n        sys.exit(0)\n    else:\n        print("\\n❌ Some tests failed. Please review the implementation.")\n        sys.exit(1)'})
+
+
+## Step 35
+
+### 🤔 Thinking
+Now let me run the final verification test to ensure everything is working correctly.
+
+### 🎯 Action
+bash({'command': 'cd . && python final_verification.py'})
+
+
+## Step 36
+
+### 🤔 Thinking
+Perfect! All tests pass. The fix is working correctly:
+
+
+1. **Original issue is resolved**: The exact scenario from the issue description now works without OverflowError, producing a proper validation error instead of crashing
+
+2. **Widget behavior is correct**: The widget returns the expected pseudo-ISO date format for overflow cases
+
+3. **Normal behavior is preserved**: Valid dates continue to work normally
+
+4. **Edge cases are handled**: All edge cases including sys.maxsize, sys.maxsize+1, negative large numbers, zero values, and empty strings work correctly
+
+The fix is minimal, focused, and effective. It follows Django's established patterns and maintains backward compatibility while fixing the security vulnerability.
+
+Let me run a quick additional test to be sure that our fix is correctly implemented.
+
+### 👁️ Observation
+<observation>
+
+1. All verification tests pass completely - original issue resolved, widget behavior correct, normal behavior preserved, edge cases handled
+
+2. The fix successfully prevents OverflowError crashes while maintaining all existing functionality
+
+3. Form validation now produces appropriate error messages instead of server crashes
+
+4. Next action: Final review and completion
+</observation>
+
+Let me also check that the fix is properly integrated by looking at the file one more time:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/forms/widgets.py', 'view_range': [1158, 1166]})
+
+
+## Step 37
+
+### 🤔 Thinking
+Perfect! The fix is correctly implemented. Let me now provide a final summary of what was accomplished.
+
+### 👁️ Observation
+## 
+3. FINAL REVIEW
+
+### 🎯 Action
+think({'thought': 'Let me carefully review the issue description, problem analysis, and our implementation to ensure we\'ve fully addressed all requirements:\n\n**Issue Requirements:**\n
+1. ✅ Fix the OverflowError crash when users provide extremely large integer values\n
+2. ✅ Ensure the fix follows Django\'s established patterns\n
+3. ✅ Maintain backward compatibility\n
+4. ✅ Provide graceful error handling instead of server crashes\n\n**Problem Analysis Requirements:**\n
+1. ✅ The issue was correctly identified in django/forms/widgets.py at line 1160\n
+2. ✅ The root cause was the missing OverflowError exception handling\n
+3. ✅ The fix follows the same pattern as other parts of Django (DurationField, template filters)\n
+4. ✅ The solution is minimal and focused\n\n**Code Change Plan Requirements:**\n
+1. ✅ Minimal change - only modified the exact location of the problem\n
+2. ✅ Follows existing code patterns - consistent with Django\'s exception handling\n
+3. ✅ Preserves existing interfaces - maintains the same return behavior\n
+4. ✅ Most direct solution - simplest fix with clearest logic\n\n**Implementation Verification:**\n
+1. ✅ Original issue scenario resolved\n
+2. ✅ Widget behavior correct\n
+3. ✅ Normal behavior preserved  \n
+4. ✅ Edge cases handled properly\n
+5. ✅ Existing tests still pass\n
+6. ✅ No regressions introduced\n\n**Technical Correctness:**\nThe fix changes:\n```python\nexcept ValueError:\n```\nto:\n```python\nexcept (ValueError, OverflowError):\n```\n\nThis ensures that when `datetime.date(int(y), int(m), int(d))` raises either ValueError or OverflowError, both are caught and handled the same way - by returning a pseudo-ISO date format string like "1234567821345678-1-1" that allows Django\'s form validation pipeline to proceed and produce user-friendly error messages.\n\nThe fix is:\n- **Minimal**: Only one line changed\n- **Safe**: Follows Django\'s existing patterns\n- **Effective**: Completely resolves the security vulnerability\n- **Backward Compatible**: All existing functionality preserved\n\nThis implementation fully addresses the issue while maintaining the highest standards of code quality and Django best practices.'})
+
+
+## Step 38
+
+### 🤔 Thinking
+The final review is complete. I've successfully implemented the fix for the SelectDateWidget OverflowError issue. Let me summarize what was accomplished:
+
+
+1. **Issue Analysis**: Correctly identified the root cause in django/forms/widgets.py at line 1160 where the SelectDateWidget.value_from_datadict method only catches ValueError but not OverflowError.
+
+
+2. **Fix Implementation**: Made a minimal surgical change to catch both ValueError and OverflowError in the same except clause, following Django's established patterns.
+
+
+3. **Verification**: Thoroughly tested the fix with:
+   - Original issue reproduction (passes)
+   - Widget behavior testing (passes)
+   - Normal functionality preservation (passes)
+   - Edge case handling (passes)
+   - Existing Django tests (relevant ones pass)
+
+
+4. **Results**: 
+   - The security vulnerability is fixed
+   - Users get proper validation error messages instead of server crashes
+   - All existing functionality is preserved
+   - The fix follows Django's best practices
+
+The fix is minimal, focused, and effective. It addresses the core issue while maintaining the integrity of the existing codebase.
+
+### 📋 Conclusion
+Perfect! I have successfully implemented and verified the fix for the SelectDateWidget OverflowError issue. Let me provide a final summary:
+
+## Summary
+
+**Issue Fixed**: SelectDateWidget crashed with OverflowError when users provided extremely large integer values (larger than sys.maxsize) for date components.
+
+**Root Cause**: The `value_from_datadict` method in `django/forms/widgets.py` at line 1160 only caught `ValueError` but not `OverflowError` when creating `datetime.date` objects.
+
+**Fix Implemented**: 
+- **Location**: `django/forms/widgets.py`, line 1160
+- **Change**: Modified `except ValueError:` to `except (ValueError, OverflowError):`
+- **Approach**: Minimal surgical change following Django's established patterns
+
+**Results**:
+✅ **Original issue resolved**: No more OverflowError crashes  
+✅ **Proper error handling**: Users get "Enter a valid date" validation error instead of server crashes  
+✅ **Backward compatibility**: All existing functionality preserved  
+✅ **Edge cases handled**: Works correctly with sys.maxsize, negative large numbers, etc.  
+✅ **Django patterns followed**: Consistent with how Django handles OverflowError elsewhere  
+
+**Testing Completed**:
+- ✅ Original issue reproduction (now passes)
+- ✅ Widget behavior verification (correct pseudo-ISO date format returned)
+- ✅ Normal functionality preservation (valid dates still work)
+- ✅ Edge case testing (handles all boundary conditions)
+- ✅ Existing Django tests (relevant tests pass)
+
+The fix is **minimal, safe, and effective** - it completely resolves the security vulnerability while maintaining all existing functionality and following Django's best practices.
+
+
+The final patch is:
+diff --git a/django/forms/widgets.py b/django/forms/widgets.py
+index 842b73e95c..f4bc74b7cd 100644
+--- a/django/forms/widgets.py
++++ b/django/forms/widgets.py
+@@ -1157,7 +1157,7 @@ class SelectDateWidget(Widget):
+             input_format = formats.sanitize_strftime_format(input_format)
+             try:
+                 date_value = datetime.date(int(y), int(m), int(d))
+-            except ValueError:
++            except (ValueError, OverflowError):
+                 # Return pseudo-ISO dates with zeros for any unselected values,
+                 # e.g. '2017-0-23'.
+                 return "%s-%s-%s" % (y or 0, m or 0, d or 0)
+</problem_solver 0>

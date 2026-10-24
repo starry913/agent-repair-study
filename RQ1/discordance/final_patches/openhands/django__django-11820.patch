@@ -1,0 +1,184 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index b53b33e47e..7e4fa9ac68 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -1643,9 +1643,35 @@ class Model(metaclass=ModelBase):
+         # Convert "-field" to "field".
+         fields = ((f[1:] if f.startswith('-') else f) for f in fields)
+
+-        # Skip ordering in the format field1__field2 (FIXME: checking
+-        # this format would be nice, but it's a little fiddly).
+-        fields = (f for f in fields if LOOKUP_SEP not in f)
++        # Separate related field and non related fields.
++        _fields = []
++        related_fields = []
++        for f in fields:
++            if LOOKUP_SEP in f:
++                related_fields.append(f)
++            else:
++                _fields.append(f)
++        fields = _fields
++
++        # Check related fields.
++        for field in related_fields:
++            _cls = cls
++            fld = None
++            for part in field.split(LOOKUP_SEP):
++                try:
++                    fld = _cls._meta.get_field(part)
++                    if fld.is_relation:
++                        _cls = fld.get_path_info()[-1].to_opts.model
++                except (FieldDoesNotExist, AttributeError):
++                    if fld is None or fld.get_transform(part) is None:
++                        errors.append(
++                            checks.Error(
++                                "'ordering' refers to the nonexistent field, "
++                                "related field or lookup '%s'." % field,
++                                obj=cls,
++                                id='models.E015',
++                            )
++                        )
+
+         # Skip ordering on pk. This is always a valid order_by field
+         # but is an alias and therefore won't be found by opts.get_field.
+diff --git a/docs/ref/checks.txt b/docs/ref/checks.txt
+index 6ec3028c35..0b9fd39eb9 100644
+--- a/docs/ref/checks.txt
++++ b/docs/ref/checks.txt
+@@ -277,8 +277,8 @@ Models
+   supported for that option.
+ * **models.E014**: ``ordering`` must be a tuple or list (even if you want to
+   order by only one field).
+-* **models.E015**: ``ordering`` refers to the nonexistent field
+-  ``<field name>``.
++* **models.E015**: ``ordering`` refers to the nonexistent field, related field
++  or lookup ``<field name>``.
+ * **models.E016**: ``indexes/index_together/unique_together`` refers to field
+   ``<field_name>`` which is not local to model ``<model>``.
+ * **models.E017**: Proxy model ``<model>`` contains model fields.
+diff --git a/tests/invalid_models_tests/test_models.py b/tests/invalid_models_tests/test_models.py
+index 5b7042e127..320e799a6e 100644
+--- a/tests/invalid_models_tests/test_models.py
++++ b/tests/invalid_models_tests/test_models.py
+@@ -5,9 +5,10 @@ from django.core.checks import Error, Warning
+ from django.core.checks.model_checks import _check_lazy_references
+ from django.core.exceptions import ImproperlyConfigured
+ from django.db import connection, connections, models
++from django.db.models.functions import Lower
+ from django.db.models.signals import post_init
+ from django.test import SimpleTestCase
+-from django.test.utils import isolate_apps, override_settings
++from django.test.utils import isolate_apps, override_settings, register_lookup
+
+
+ def get_max_column_name_length():
+@@ -665,6 +666,89 @@ class OtherModelTests(SimpleTestCase):
+             )
+         ])
+
++    def test_ordering_pointing_to_missing_related_field(self):
++        class Model(models.Model):
++            test = models.IntegerField()
++
++            class Meta:
++                ordering = ('missing_related__id',)
++
++        self.assertEqual(Model.check(), [
++            Error(
++                "'ordering' refers to the nonexistent field, related field "
++                "or lookup 'missing_related__id'.",
++                obj=Model,
++                id='models.E015',
++            )
++        ])
++
++    def test_ordering_pointing_to_missing_related_model_field(self):
++        class Parent(models.Model):
++            pass
++
++        class Child(models.Model):
++            parent = models.ForeignKey(Parent, models.CASCADE)
++
++            class Meta:
++                ordering = ('parent__missing_field',)
++
++        self.assertEqual(Child.check(), [
++            Error(
++                "'ordering' refers to the nonexistent field, related field "
++                "or lookup 'parent__missing_field'.",
++                obj=Child,
++                id='models.E015',
++            )
++        ])
++
++    def test_ordering_pointing_to_non_related_field(self):
++        class Child(models.Model):
++            parent = models.IntegerField()
++
++            class Meta:
++                ordering = ('parent__missing_field',)
++
++        self.assertEqual(Child.check(), [
++            Error(
++                "'ordering' refers to the nonexistent field, related field "
++                "or lookup 'parent__missing_field'.",
++                obj=Child,
++                id='models.E015',
++            )
++        ])
++
++    def test_ordering_pointing_to_two_related_model_field(self):
++        class Parent2(models.Model):
++            pass
++
++        class Parent1(models.Model):
++            parent2 = models.ForeignKey(Parent2, models.CASCADE)
++
++        class Child(models.Model):
++            parent1 = models.ForeignKey(Parent1, models.CASCADE)
++
++            class Meta:
++                ordering = ('parent1__parent2__missing_field',)
++
++        self.assertEqual(Child.check(), [
++            Error(
++                "'ordering' refers to the nonexistent field, related field "
++                "or lookup 'parent1__parent2__missing_field'.",
++                obj=Child,
++                id='models.E015',
++            )
++        ])
++
++    def test_ordering_allows_registered_lookups(self):
++        class Model(models.Model):
++            test = models.CharField(max_length=100)
++
++            class Meta:
++                ordering = ('test__lower',)
++
++        with register_lookup(models.CharField, Lower):
++            self.assertEqual(Model.check(), [])
++
+     def test_ordering_pointing_to_foreignkey_field(self):
+         class Parent(models.Model):
+             pass
+diff --git a/tests/postgres_tests/test_json.py b/tests/postgres_tests/test_json.py
+index 6622820ec9..e95939be16 100644
+--- a/tests/postgres_tests/test_json.py
++++ b/tests/postgres_tests/test_json.py
+@@ -19,6 +19,15 @@ except ImportError:
+     pass
+
+
++class TestModelMetaOrdering(PostgreSQLTestCase):
++    def test_ordering_by_json_field_value(self):
++        class TestJSONModel(JSONModel):
++            class Meta:
++                ordering = ['field__value']
++
++        self.assertEqual(TestJSONModel.check(), [])
++
++
+ class TestSaveLoad(PostgreSQLTestCase):
+     def test_null(self):
+         instance = JSONModel()

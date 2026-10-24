@@ -1,0 +1,129 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 55b1691166..5b6a23780e 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -872,6 +872,11 @@ class Model(metaclass=ModelBase):
+             results = self._do_insert(cls._base_manager, using, fields, returning_fields, raw)
+             if results:
+                 for value, field in zip(results[0], returning_fields):
++                    # Apply field converters (including from_db_value) to returned values
++                    if hasattr(field, 'get_db_converters'):
++                        converters = field.get_db_converters(connections[using])
++                        for converter in converters:
++                            value = converter(value, None, connections[using])
+                     setattr(self, field.attname, value)
+         return updated
+ 
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index 387deca527..a8321e7ba4 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -505,6 +505,11 @@ class QuerySet:
+                 for obj_with_pk, results in zip(objs_with_pk, returned_columns):
+                     for result, field in zip(results, opts.db_returning_fields):
+                         if field != opts.pk:
++                            # Apply field converters (including from_db_value) to returned values
++                            if hasattr(field, 'get_db_converters'):
++                                converters = field.get_db_converters(connection)
++                                for converter in converters:
++                                    result = converter(result, None, connection)
+                             setattr(obj_with_pk, field.attname, result)
+                 for obj_with_pk in objs_with_pk:
+                     obj_with_pk._state.adding = False
+@@ -518,6 +523,11 @@ class QuerySet:
+                     assert len(returned_columns) == len(objs_without_pk)
+                 for obj_without_pk, results in zip(objs_without_pk, returned_columns):
+                     for result, field in zip(results, opts.db_returning_fields):
++                        # Apply field converters (including from_db_value) to returned values
++                        if hasattr(field, 'get_db_converters'):
++                            converters = field.get_db_converters(connection)
++                            for converter in converters:
++                                result = converter(result, None, connection)
+                         setattr(obj_without_pk, field.attname, result)
+                     obj_without_pk._state.adding = False
+                     obj_without_pk._state.db = self.db
+diff --git a/tests/from_db_value/models.py b/tests/from_db_value/models.py
+index 58e8ec3a27..85c69e5492 100644
+--- a/tests/from_db_value/models.py
++++ b/tests/from_db_value/models.py
+@@ -21,3 +21,42 @@ class CashField(models.DecimalField):
+ 
+ class CashModel(models.Model):
+     cash = CashField()
++
++
++class IntWrapper:
++    """A wrapper class that wraps integer values."""
++    def __init__(self, value):
++        self.value = int(value)
++        
++    def __str__(self):
++        return f"<IntWrapper: {self.value}>"
++    
++    def __repr__(self):
++        return f"<IntWrapper: {self.value}>"
++        
++    def __eq__(self, other):
++        if isinstance(other, IntWrapper):
++            return self.value == other.value
++        return self.value == other
++        
++    def __int__(self):
++        return self.value
++
++
++class WrapperAutoField(models.BigAutoField):
++    """Custom AutoField that wraps values with IntWrapper."""
++    def from_db_value(self, value, expression, connection):
++        if value is None:
++            return None
++        return IntWrapper(value)
++    
++    def get_prep_value(self, value):
++        if value is None:
++            return None
++        return int(value)
++
++
++class AutoFieldModel(models.Model):
++    """Test model with custom AutoField for INSERT converter testing."""
++    id = WrapperAutoField(primary_key=True)
++    name = models.CharField(max_length=100, default='test')
+diff --git a/tests/from_db_value/tests.py b/tests/from_db_value/tests.py
+index ab92f37ccf..d21c4fe5e3 100644
+--- a/tests/from_db_value/tests.py
++++ b/tests/from_db_value/tests.py
+@@ -2,7 +2,7 @@ from django.db import connection
+ from django.db.models import Max
+ from django.test import TestCase
+ 
+-from .models import Cash, CashModel
++from .models import Cash, CashModel, IntWrapper, AutoFieldModel
+ 
+ 
+ class FromDBValueTest(TestCase):
+@@ -33,3 +33,24 @@ class FromDBValueTest(TestCase):
+     def test_connection(self):
+         instance = CashModel.objects.get()
+         self.assertEqual(instance.cash.vendor, connection.vendor)
++
++
++class AutoFieldFromDBValueTest(TestCase):
++    """Test from_db_value with AutoField that has db_returning=True."""
++    
++    def test_create_operation_converter(self):
++        """Test that from_db_value is applied to INSERT operations for AutoField."""
++        # Create a new instance - this should apply converters
++        instance = AutoFieldModel.objects.create(name='test')
++        self.assertIsInstance(instance.id, IntWrapper)
++        self.assertEqual(instance.id.value, 1)
++        
++    def test_query_operation_converter(self):
++        """Test that from_db_value is applied to SELECT operations for AutoField."""
++        # Create an instance first
++        AutoFieldModel.objects.create(name='test')
++        
++        # Query it back - this should also apply converters
++        instance = AutoFieldModel.objects.get()
++        self.assertIsInstance(instance.id, IntWrapper)
++        self.assertEqual(instance.id.value, 1)

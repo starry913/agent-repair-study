@@ -1,0 +1,179 @@
+diff --git a/django/core/handlers/base.py b/django/core/handlers/base.py
+index cbdaea5a97..93b8f04cac 100644
+--- a/django/core/handlers/base.py
++++ b/django/core/handlers/base.py
+@@ -24,10 +24,6 @@ logger = logging.getLogger('django.request')
+
+
+ class BaseHandler(object):
+-    # Changes that are always applied to a response (in this order).
+-    response_fixes = [
+-        http.conditional_content_removal,
+-    ]
+
+     def __init__(self):
+         self._request_middleware = None
+@@ -230,7 +226,6 @@ class BaseHandler(object):
+                         "%s.process_response didn't return an "
+                         "HttpResponse object. It returned None instead."
+                         % (middleware_method.__self__.__class__.__name__))
+-            response = self.apply_response_fixes(request, response)
+         except Exception:  # Any exception should be gathered and handled
+             signals.got_request_exception.send(sender=self.__class__, request=request)
+             response = self.handle_uncaught_exception(request, resolver, sys.exc_info())
+@@ -289,13 +284,3 @@ class BaseHandler(object):
+         # Return an HttpResponse that displays a friendly error message.
+         callback, param_dict = resolver.resolve_error_handler(500)
+         return callback(request, **param_dict)
+-
+-    def apply_response_fixes(self, request, response):
+-        """
+-        Applies each of the functions in self.response_fixes to the request and
+-        response, modifying the response in the process. Returns the new
+-        response.
+-        """
+-        for func in self.response_fixes:
+-            response = func(request, response)
+-        return response
+diff --git a/django/http/__init__.py b/django/http/__init__.py
+index 00a303c11c..491239bf8a 100644
+--- a/django/http/__init__.py
++++ b/django/http/__init__.py
+@@ -9,7 +9,6 @@ from django.http.response import (
+     HttpResponsePermanentRedirect, HttpResponseRedirect,
+     HttpResponseServerError, JsonResponse, StreamingHttpResponse,
+ )
+-from django.http.utils import conditional_content_removal
+
+ __all__ = [
+     'SimpleCookie', 'parse_cookie', 'HttpRequest', 'QueryDict',
+@@ -19,5 +18,4 @@ __all__ = [
+     'HttpResponseBadRequest', 'HttpResponseForbidden', 'HttpResponseNotFound',
+     'HttpResponseNotAllowed', 'HttpResponseGone', 'HttpResponseServerError',
+     'Http404', 'BadHeaderError', 'JsonResponse', 'FileResponse',
+-    'conditional_content_removal',
+ ]
+diff --git a/django/http/utils.py b/django/http/utils.py
+deleted file mode 100644
+index 3ea71cb892..0000000000
+--- a/django/http/utils.py
++++ /dev/null
+@@ -1,28 +0,0 @@
+-"""
+-Functions that modify an HTTP request or response in some way.
+-"""
+-
+-# This group of functions are run as part of the response handling, after
+-# everything else, including all response middleware. Think of them as
+-# "compulsory response middleware". Be careful about what goes here, because
+-# it's a little fiddly to override this behavior, so they should be truly
+-# universally applicable.
+-
+-
+-def conditional_content_removal(request, response):
+-    """
+-    Removes the content of responses for HEAD requests, 1xx, 204 and 304
+-    responses. Ensures compliance with RFC 2616, section 4.3.
+-    """
+-    if 100 <= response.status_code < 200 or response.status_code in (204, 304):
+-        if response.streaming:
+-            response.streaming_content = []
+-        else:
+-            response.content = b''
+-        response['Content-Length'] = '0'
+-    if request.method == 'HEAD':
+-        if response.streaming:
+-            response.streaming_content = []
+-        else:
+-            response.content = b''
+-    return response
+diff --git a/django/test/client.py b/django/test/client.py
+index 8349a902fa..166e6ef877 100644
+--- a/django/test/client.py
++++ b/django/test/client.py
+@@ -92,6 +92,26 @@ def closing_iterator_wrapper(iterable, close):
+         request_finished.connect(close_old_connections)
+
+
++def conditional_content_removal(request, response):
++    """
++    Simulate the behavior of most Web servers by removing the content of
++    responses for HEAD requests, 1xx, 204, and 304 responses. Ensures
++    compliance with RFC 2616, section 4.3.
++    """
++    if 100 <= response.status_code < 200 or response.status_code in (204, 304):
++        if response.streaming:
++            response.streaming_content = []
++        else:
++            response.content = b''
++        response['Content-Length'] = '0'
++    if request.method == 'HEAD':
++        if response.streaming:
++            response.streaming_content = []
++        else:
++            response.content = b''
++    return response
++
++
+ class ClientHandler(BaseHandler):
+     """
+     A HTTP Handler that can be used for testing purposes. Uses the WSGI
+@@ -120,6 +140,10 @@ class ClientHandler(BaseHandler):
+
+         # Request goes through middleware.
+         response = self.get_response(request)
++
++        # Simulate behaviors of most Web servers.
++        conditional_content_removal(request, response)
++
+         # Attach the originating request to the response so that it could be
+         # later retrieved.
+         response.wsgi_request = request
+diff --git a/docs/releases/1.10.txt b/docs/releases/1.10.txt
+index a7a7077bc3..f688758a91 100644
+--- a/docs/releases/1.10.txt
++++ b/docs/releases/1.10.txt
+@@ -778,6 +778,11 @@ Miscellaneous
+   attribute to ``False`` to disable it. You could also add the ``novalidate``
+   attribute to ``<form>`` if you don't want browser validation.
+
++* The WSGI handler no longer removes content of responses from ``HEAD``
++  requests or responses with a ``status_code`` of 100-199, 204, or 304. Most
++  Web servers already implement this behavior. Responses retrieved using the
++  Django test client continue to have these "response fixes" applied.
++
+ .. _deprecated-features-1.10:
+
+ Features deprecated in 1.10
+diff --git a/tests/http_utils/tests.py b/tests/test_client/test_conditional_content_removal.py
+similarity index 89%
+rename from tests/http_utils/tests.py
+rename to tests/test_client/test_conditional_content_removal.py
+index 53e06c8938..cc5bdb69ed 100644
+--- a/tests/http_utils/tests.py
++++ b/tests/test_client/test_conditional_content_removal.py
+@@ -4,8 +4,8 @@ import gzip
+ import io
+
+ from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
+-from django.http.utils import conditional_content_removal
+ from django.test import SimpleTestCase
++from django.test.client import conditional_content_removal
+
+
+ # based on Python 3.3's gzip.compress
+@@ -19,12 +19,12 @@ def gzip_compress(data):
+     return buf.getvalue()
+
+
+-class HttpUtilTests(SimpleTestCase):
++class ConditionalContentTests(SimpleTestCase):
+
+     def test_conditional_content_removal(self):
+         """
+-        Tests that content is removed from regular and streaming responses with
+-        a status_code of 100-199, 204, 304 or a method of "HEAD".
++        Content is removed from regular and streaming responses with a
++        status_code of 100-199, 204, 304, or a method of "HEAD".
+         """
+         req = HttpRequest()

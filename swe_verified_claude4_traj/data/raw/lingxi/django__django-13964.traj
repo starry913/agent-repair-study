@@ -1,0 +1,2811 @@
+<issue_description>
+Saving parent object after setting on child leads to data loss for parents with non-numeric primary key.
+Description
+	 
+		(last modified by Charlie DeTar)
+	 
+Given a model with a foreign key relation to another model that has a non-auto CharField as its primary key:
+class Product(models.Model):
+	sku = models.CharField(primary_key=True, max_length=50)
+class Order(models.Model):
+	product = models.ForeignKey(Product, on_delete=models.CASCADE)
+If the relation is initialized on the parent with an empty instance that does not yet specify its primary key, and the primary key is subsequently defined, the parent does not "see" the primary key's change:
+with transaction.atomic():
+	order = Order()
+	order.product = Product()
+	order.product.sku = "foo"
+	order.product.save()
+	order.save()
+	assert Order.objects.filter(product_id="").exists() # Succeeds, but shouldn't
+	assert Order.objects.filter(product=order.product).exists() # Fails
+Instead of product_id being populated with product.sku, it is set to emptystring. The foreign key constraint which would enforce the existence of a product with sku="" is deferred until the transaction commits. The transaction does correctly fail on commit with a ForeignKeyViolation due to the non-existence of a product with emptystring as its primary key.
+On the other hand, if the related unsaved instance is initialized with its primary key before assignment to the parent, it is persisted correctly:
+with transaction.atomic():
+	order = Order()
+	order.product = Product(sku="foo")
+	order.product.save()
+	order.save()
+	assert Order.objects.filter(product=order.product).exists() # succeeds
+Committing the transaction also succeeds.
+This may have something to do with how the Order.product_id field is handled at assignment, together with something about handling fetching of auto vs non-auto primary keys from the related instance.
+</issue_description>
+
+<problem_decoder 0>
+## Step 1
+
+### 🤔 Thinking
+I need to analyze this issue step by step. Let me start by understanding the problem, then explore the codebase to understand the root cause.
+
+## Reading Phase
+
+From the issue description, I can see:
+
+
+1. There's a model with a foreign key relation to another model that has a non-auto CharField as its primary key
+
+2. The problem occurs when:
+   - A relation is initialized on the parent with an empty instance that doesn't specify its primary key
+   - The primary key is subsequently defined
+   - The parent doesn't "see" the primary key's change
+   - The `product_id` field ends up being set to an empty string instead of the actual primary key value
+
+
+3. This works correctly when the related unsaved instance is initialized with its primary key before assignment to the parent
+
+
+4. The issue seems to be related to how the `Order.product_id` field is handled at assignment, together with handling of auto vs non-auto primary keys.
+
+Let me start exploring the repository to understand the structure and find relevant code.
+
+### 👁️ Observation
+I'll help you analyze this issue step by step. Let me start by exploring the repository structure to understand the codebase and then identify the root cause of the problem.
+
+### 🎯 Action
+view_directory({'dir_path': './', 'depth': 2})
+
+
+## Step 2
+
+### 🤔 Thinking
+Great! I can see this is a Django repository. The issue is related to foreign key relationships and how they handle non-auto CharField primary keys. Let me explore the relevant Django components, particularly the ORM layer and model fields.
+
+Let me first look at the django/db/ directory to understand the ORM structure:
+
+### 🎯 Action
+view_directory({'dir_path': './django/db', 'depth': 2})
+
+
+## Step 3
+
+### 🤔 Thinking
+Now I can see the Django ORM structure. Based on the issue description and the dev_knowledge, this seems to be related to foreign key field handling. Let me look at the relevant files:
+
+
+1. `django/db/models/base.py` - This likely contains the Model class with save methods
+
+2. `django/db/models/fields/related.py` - This likely contains foreign key field implementation  
+
+3. `django/db/models/fields/related_descriptors.py` - This likely contains the descriptors that handle foreign key relationships
+
+Let me start by examining the issue. The problem is that when you:
+
+1. Create an Order instance
+
+2. Set its product to a new Product instance (without primary key set)
+
+3. Set the product's primary key (sku) after assignment 
+
+4. Save the product, then the order
+
+The foreign key field (product_id) on the Order ends up as an empty string instead of the actual sku value.
+
+Let me search for relevant code to understand how foreign keys are handled during assignment and saving.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models', 'keywords': ['foreign.*key', 'product_id', 'CharField.*primary_key', 'attname', 'get_value_for_update']})
+
+
+## Step 4
+
+### 🤔 Thinking
+Let me look at the related fields implementation first, as this seems to be where the foreign key relationship is handled:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [1, 100]})
+
+
+## Step 5
+
+### 🤔 Thinking
+Let me search for the ForeignKey class definition:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/fields/related.py', 'keywords': ['class ForeignKey', 'def __set__', 'def __init__']})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me search for the ForeignKey class more broadly:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/fields/related.py', 'keywords': ['ForeignKey']})
+
+
+## Step 7
+
+### 🤔 Thinking
+That's odd. Let me search more broadly for ForeignKey:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models', 'keywords': ['class ForeignKey']})
+
+
+## Step 8
+
+### 🤔 Thinking
+Great! Let me look at the ForeignKey class:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [771, 850]})
+
+
+## Step 9
+
+### 🤔 Thinking
+I notice the ForeignKey has a `descriptor_class = ForeignKeyDeferredAttribute` on line 
+779. Let me look at that descriptor class as this is likely where the assignment logic happens. But first, let me look at the ForeignObject base class to understand the inheritance:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/fields/related.py', 'keywords': ['class ForeignObject']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me search more broadly:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/fields/related.py', 'keywords': ['ForeignObject']})
+
+
+## Step 11
+
+### 🤔 Thinking
+Let me search for ForeignObject in the whole file:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [250, 350]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me look for the ForeignObject class definition:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/fields/related.py', 'keywords': ['class.*ForeignObject']})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me search for ForeignObject in a different way:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [350, 450]})
+
+
+## Step 14
+
+### 🤔 Thinking
+Great! Now I found the ForeignObject class at line 
+444. Let me look at the initialization and other relevant methods:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [444, 550]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Now let me examine the related descriptors, especially `ForeignKeyDeferredAttribute` which is used as the descriptor for foreign key fields:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_descriptors.py', 'view_range': [1, 100]})
+
+
+## Step 16
+
+### 🤔 Thinking
+Now let me look for the `__set__` method in the ForeignKeyDeferredAttribute class and understand how it works:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_descriptors.py', 'view_range': [75, 120]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Now I need to understand the `__set__` method. It seems like it's directly setting the foreign key field's `attname` in the instance dictionary. Let me look at the `ForwardManyToOneDescriptor` class to see if it has a `__set__` method:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/fields/related_descriptors.py', 'keywords': ['def __set__']})
+
+
+## Step 18
+
+### 🤔 Thinking
+That's odd, let me search for __set__ in the file:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/fields/related_descriptors.py', 'keywords': ['__set__']})
+
+
+## Step 19
+
+### 🤔 Thinking
+Let me search for the ForwardManyToOneDescriptor methods to understand the assignment flow:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_descriptors.py', 'view_range': [150, 250]})
+
+
+## Step 20
+
+### 🤔 Thinking
+Let me continue reading the `__set__` method to see how it handles the assignment:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_descriptors.py', 'view_range': [250, 300]})
+
+
+## Step 21
+
+### 🤔 Thinking
+Now I can see the issue! Looking at lines 256-257, when setting a foreign key relationship, the `__set__` method does this:
+
+
+
+```python
+for lh_field, rh_field in self.field.related_fields:
+    setattr(instance, lh_field.attname, getattr(value, rh_field.attname))
+
+
+```
+
+This means that when `order.product = Product()` is called, the foreign key field (`product_id`) is set to the current value of the related object's primary key field (`product.sku`). At the time of assignment, the `Product` instance doesn't have its `sku` set yet, so `getattr(value, rh_field.attname)` returns the default value for the CharField primary key, which is an empty string.
+
+Later, when `order.product.sku = "foo"` is called, it only updates the `Product` instance's `sku` field, but the `Order` instance's `product_id` field is not updated because it was already set during assignment.
+
+Now let me look at the base Model class to understand how foreign key fields are handled during save operations.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/base.py', 'view_range': [1, 50]})
+
+
+## Step 22
+
+### 🤔 Thinking
+Let me search for the save method and methods related to preparing foreign key fields for save:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/base.py', 'keywords': ['_prepare_related_fields_for_save', 'def save']})
+
+
+## Step 23
+
+### 🤔 Thinking
+Let me search for these methods more broadly:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/base.py', 'keywords': ['save', 'prepare.*related.*fields']})
+
+
+## Step 24
+
+### 🤔 Thinking
+Let me look at the file structure to find the save method:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/base.py', 'view_range': [650, 750]})
+
+
+## Step 25
+
+### 🤔 Thinking
+Great! I can see that the `save` method calls `self._prepare_related_fields_for_save(operation_name='save')` on line 
+682. Let me find this method:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/base.py', 'keywords': ['_prepare_related_fields_for_save']})
+
+
+## Step 26
+
+### 🤔 Thinking
+Let me search for it more broadly:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/base.py', 'keywords': ['prepare_related_fields']})
+
+
+## Step 27
+
+### 🤔 Thinking
+Let me search for the method definition:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/base.py', 'keywords': ['def.*prepare.*related']})
+
+
+## Step 28
+
+### 🤔 Thinking
+Let me look for the method by viewing more of the file:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/base.py', 'view_range': [1000, 1100]})
+
+
+## Step 29
+
+### 🤔 Thinking
+Let me look for the _prepare_related_fields_for_save method by searching different sections of the file:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/db/models/base.py', 'keywords': ['def _prepare_related_fields_for_save']})
+
+
+## Step 30
+
+### 🤔 Thinking
+Let me search for this method across the entire Django codebase:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django', 'keywords': ['_prepare_related_fields_for_save']})
+
+
+## Step 31
+
+### 🤔 Thinking
+Great! Let me check this method in the base.py file:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/base.py', 'view_range': [900, 920]})
+
+
+## Step 32
+
+### 🤔 Thinking
+Let me see more of this method:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/base.py', 'view_range': [911, 980]})
+
+
+## Step 33
+
+### 🤔 Thinking
+Now I can see the issue more clearly! The problem is in the `_prepare_related_fields_for_save` method. Let me analyze the relevant lines:
+
+
+1. Line 936: `elif getattr(self, field.attname) is None:` - This only updates the foreign key field if it's None
+
+2. Line 939: `setattr(self, field.attname, obj.pk)` - If the foreign key field is None, it sets it to the related object's pk
+
+However, there's a problem here! In the case described in the issue:
+
+1. When `order.product = Product()` is called, the `product_id` field is set to an empty string (the default value of the CharField primary key)
+
+2. Later when `order.product.sku = "foo"` is called, the product's primary key is updated
+
+3. But when `order.save()` is called, the condition `getattr(self, field.attname) is None` evaluates to False because `product_id` is an empty string, not None
+
+4. So the foreign key field doesn't get updated with the correct primary key value
+
+The issue is that the method only updates the foreign key field if it's None, but it doesn't handle the case where the field was set to the default value (empty string) of an unsaved related object.
+
+Let me also check what happens with the line 942-943:
+
+
+```python
+if getattr(obj, field.target_field.attname) != getattr(self, field.attname):
+    field.delete_cached_value(self)
+
+
+```
+
+This checks if the related object's primary key doesn't match the current foreign key value, and if so, clears the cached relationship. But this doesn't actually update the foreign key field.
+
+So the root cause is that `_prepare_related_fields_for_save` doesn't handle the case where the foreign key field was set to the default value of an unsaved related object, and the related object's primary key was subsequently updated.
+
+I'll investigate the existing test coverage to understand how this scenario is currently handled.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests', 'keywords': ['_prepare_related_fields_for_save', 'CharField.*primary_key', 'foreign.*key.*non.*auto']})
+
+
+## Step 34
+
+### 🤔 Thinking
+Let me look at the custom_pk tests to see if there are already similar tests:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/custom_pk/models.py'})
+
+
+## Step 35
+
+### 🤔 Thinking
+Now let me examine the issue more closely. Let me check the development knowledge sections to ensure I covered all the required aspects:
+
+
+1. **general_root_cause_analysis_steps**: I need to trace the execution flow and check state management
+
+2. **involved_components**: I need to check relationship management system, field cache system
+
+3. **relevant_architecture**: I need to check the ORM architecture, model layer
+
+4. **bug_categorization**: This is a State Management Issue with Foreign Key Relationship Handling
+
+Let me also check the exact location and behavior of the issue. The problem seems to be in the `_prepare_related_fields_for_save` method where it doesn't handle the case where the foreign key field is set to a default value (empty string) rather than None.
+
+Let me check the ask_repository_agent for more context:
+
+### 🎯 Action
+ask_repository_agent({'query': 'How does Django handle foreign key relationships when the related object has a CharField primary key that is set after assignment? Are there any existing tests for this scenario?'})
+
+
+## Step 36
+
+### 🤔 Thinking
+Now I need to understand better the `_prepare_related_fields_for_save` method and what happens during foreign key assignment. Let me also check the `ForwardManyToOneDescriptor`'s `__set__` method again to understand the issue better:
+
+The key issue seems to be:
+
+1. When `order.product = Product()` is called, the `Product()` has an empty string `sku` (the default value)
+
+2. The `__set__` method in `ForwardManyToOneDescriptor` calls `setattr(instance, lh_field.attname, getattr(value, rh_field.attname))` which sets `product_id` to the empty string
+
+3. When `order.product.sku = "foo"` is called, it updates the `Product` instance's `sku` field but doesn't update the `Order` instance's `product_id` field
+
+4. When `order.save()` is called, the `_prepare_related_fields_for_save` method only updates the foreign key field if it's None, but it's an empty string, not None
+
+Let me check how this method works in detail:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/base.py', 'view_range': [936, 944]})
+
+
+## Step 37
+
+### 🤔 Thinking
+Now I can see the issue clearly. Let me check what happens when CharField primary keys are involved. The problem is that in the `_prepare_related_fields_for_save` method:
+
+
+1. **Line 936**: The condition `getattr(self, field.attname) is None` only handles the case where the foreign key field is None
+
+2. **Line 939**: It sets the foreign key field to the related object's pk value
+
+3. **Lines 942-943**: It checks if the related object's pk differs from the current foreign key value and clears the cached relationship if it does, but it doesn't update the foreign key field
+
+But the issue is that when the foreign key field is set to the default value of a CharField primary key (which is an empty string, not None), the method doesn't handle this case.
+
+Let me now write the issue analysis:
+
+### 🎯 Action
+think({'thought': 'Now I understand the issue clearly. Let me analyze the problem step by step:\n\n
+1. **Reading phase**: The issue occurs when a parent object (Order) has a foreign key relationship to a child object (Product) with a CharField primary key. When the related object is assigned before its primary key is set, and then the primary key is set afterward, the foreign key field doesn\'t get updated properly.\n\n
+2. **Exploration phase**: I\'ve identified the key files and methods:\n   - `django/db/models/fields/related_descriptors.py`: Contains the `ForwardManyToOneDescriptor.__set__` method that handles foreign key assignment\n   - `django/db/models/base.py`: Contains the `_prepare_related_fields_for_save` method that is supposed to sync foreign key fields during save operations\n\n
+3. **Root cause**: The issue is in the `_prepare_related_fields_for_save` method in `django/db/models/base.py`. Specifically:\n   - Line 936: `elif getattr(self, field.attname) is None:` - This condition only handles the case where the foreign key field is None\n   - When `order.product = Product()` is called, the `product_id` field is set to an empty string (the default value of the CharField primary key)\n   - When `order.product.sku = "foo"` is called later, the condition fails because `product_id` is an empty string, not None\n   - So the foreign key field never gets updated with the correct primary key value\n\n
+4. **Current behavior**: The foreign key field remains as an empty string, causing database integrity issues when the transaction commits.\n\n
+5. **Expected behavior**: The foreign key field should be updated to the correct primary key value when the related object\'s primary key is set after assignment.\n\nLet me now write the comprehensive issue analysis.'})
+
+
+## Step 38
+
+### 🤔 Thinking
+Now I'll write the comprehensive issue analysis based on my exploration and understanding:
+
+### 📋 Conclusion
+<observation>
+
+1. Found the root cause of the issue:
+   - Issue occurs in `_prepare_related_fields_for_save` method in `django/db/models/base.py`
+   - The method only updates foreign key fields when they are None, but not when they contain default values (empty strings)
+   - When a foreign key is assigned to an unsaved object with a CharField primary key, the foreign key field gets set to the default value (empty string) but never gets updated when the related object's primary key is set later
+
+
+2. Alternative action could have been to examine the database constraint handling or transaction management aspects
+
+
+3. Next action: Provide comprehensive issue analysis covering all aspects including root cause, current behavior, and expected behavior
+</observation>
+
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "When a parent object with a foreign key relationship to a child object having a non-auto CharField primary key is saved after the child's primary key is set post-assignment, the foreign key field retains its default value (empty string) instead of being updated with the correct primary key value, leading to database integrity violations."
+    - status: "yes"
+  </problem_statement>
+
+  <root_cause>
+    The root cause is in the `_prepare_related_fields_for_save` method in `django/db/models/base.py` at line 
+936. The method only updates the foreign key field when it is None (`elif getattr(self, field.attname) is None:`), but doesn't handle the case where the field contains a default value. When `order.product = Product()` is called, the `ForwardManyToOneDescriptor.__set__` method (lines 256-257 in `django/db/models/fields/related_descriptors.py`) sets the foreign key field to the current value of the related object's primary key field via `setattr(instance, lh_field.attname, getattr(value, rh_field.attname))`. Since the Product instance doesn't have its sku set yet, this results in an empty string being stored. Later, when `order.product.sku = "foo"` is called and the product is saved, the `_prepare_related_fields_for_save` method fails to update the foreign key field because the condition `getattr(self, field.attname) is None` evaluates to False (empty string != None).
+  </root_cause>
+
+  <current_behavior>
+    - **Affected files**: 
+      - `django/db/models/base.py` (lines 936-939 in `_prepare_related_fields_for_save` method)
+      - `django/db/models/fields/related_descriptors.py` (lines 256-257 in `ForwardManyToOneDescriptor.__set__` method)
+    - **Current implementation**: The `_prepare_related_fields_for_save` method only updates foreign key fields when they are None, using the condition `elif getattr(self, field.attname) is None:`. This works for auto-generated primary keys which start as None, but fails for CharField primary keys which start as empty strings.
+    - **Existing limitations**: The method doesn't handle the case where a foreign key field contains a default value (empty string) from an unsaved related object whose primary key was set after the initial assignment. The check on lines 942-943 detects the mismatch but only clears the cached relationship without updating the foreign key field.
+    - **Edge cases**: This issue specifically affects foreign key relationships where the related object has a non-auto CharField primary key and the primary key is set after the object is assigned to the foreign key field.
+  </current_behavior>
+
+  <expected_behavior>
+    - **Expected behavior**: The foreign key field should be updated with the correct primary key value when the related object's primary key is set after assignment, regardless of whether the foreign key field contains None or a default value.
+    - **Affected files**: `django/db/models/base.py` (specifically the `_prepare_related_fields_for_save` method)
+    - **Modified method**: The `_prepare_related_fields_for_save` method should be enhanced to handle cases where the foreign key field contains a default value from an unsaved related object.
+    - **Specific behavioral improvements**: 
+      
+1. Update the condition on line 936 to also handle cases where the foreign key field doesn't match the related object's current primary key value
+      
+2. Ensure the foreign key field is updated whenever there's a mismatch between the stored foreign key value and the related object's current primary key
+      
+3. Handle both None values and default values (like empty strings) for CharField primary keys
+      
+4. Maintain backward compatibility for existing behavior with auto-generated primary keys
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 0>
+
+<problem_decoder 1>
+## Step 1
+
+### 🤔 Thinking
+I need to analyze this issue step by step. Let me start by understanding the problem and then explore the repository to understand how Django handles foreign key relationships.
+
+First, let me understand the issue:
+
+1. There's a model with a foreign key relation to another model that has a non-auto CharField as its primary key
+
+2. When the relation is initialized on the parent with an empty instance that doesn't specify its primary key, and the primary key is subsequently defined, the parent doesn't "see" the primary key's change
+
+3. The foreign key ends up being set to an empty string instead of the actual primary key value
+
+4. This only happens when the related instance is created without its primary key initially
+
+Let me start by exploring the repository structure to understand how Django is organized.
+
+### 👁️ Observation
+I'll help you analyze this issue step by step. Let me start by exploring the repository structure to understand how Django handles foreign key relationships.
+
+### 🎯 Action
+view_directory({'dir_path': './', 'depth': 2})
+
+
+## Step 2
+
+### 🤔 Thinking
+This looks like a Django repository. I can see the django/ directory and tests/ directory. Let me explore the django/db directory since this issue is related to the ORM and database models.
+
+### 👁️ Observation
+<observation>
+
+1. This is the Django framework repository with the main code in django/ directory
+
+2. I can see tests/ directory which might contain relevant test cases for the issue
+
+3. The issue is related to Django ORM, so I should focus on django/db/ directory
+</observation>
+
+Let me explore the Django database and models structure:
+
+### 🎯 Action
+view_directory({'dir_path': './django/db', 'depth': 2})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I can see the key files I need to examine:
+
+1. `django/db/models/base.py` - likely contains the Model class and save method
+
+2. `django/db/models/fields/related.py` - likely contains ForeignKey implementation
+
+3. `django/db/models/fields/related_descriptors.py` - likely contains foreign key descriptors
+
+Let me first examine the base model class to understand how save() works, then look at the foreign key field implementation.
+
+### 👁️ Observation
+<observation>
+
+1. Found the Django ORM structure with key directories for models, fields, and related functionality
+
+2. The issue is related to foreign key relationships and model saving, so I should focus on:
+   - django/db/models/base.py (Model class and save method)
+   - django/db/models/fields/related.py (ForeignKey implementation)
+   - django/db/models/fields/related_descriptors.py (foreign key descriptors)
+
+3. Next action: Examine the base Model class to understand save operations and foreign key handling
+</observation>
+
+Let me start by examining the Model base class to understand how save operations work:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/base.py', 'view_range': [1, 100]})
+
+
+## Step 4
+
+### 🤔 Thinking
+I need to find the save method in the Model class. Let me search for it or look for it further down in the file.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/base.py', 'keywords': ['def save', 'def _save_table', 'def _save_parents']})
+
+
+## Step 5
+
+### 🤔 Thinking
+Strange, let me search for just "save" to see if there are methods related to saving.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/base.py', 'keywords': ['save']})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me check the full file to see if there are any save methods defined.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/base.py', 'view_range': [600, 800]})
+
+
+## Step 7
+
+### 🤔 Thinking
+Good! I found the save method. Let me also look at the `_save_table` method since that's where the actual saving happens, and I also see there's a `_prepare_related_fields_for_save` method which might be relevant to the foreign key issue.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/base.py', 'view_range': [800, 900]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Now I need to find the `_prepare_related_fields_for_save` method, which is called at the beginning of the save method and seems likely to be relevant to the foreign key issue. Let me search for it.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/base.py', 'keywords': ['_prepare_related_fields_for_save']})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me search for this method more broadly.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/base.py', 'keywords': ['prepare_related_fields']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me look for the method definition in the file by viewing more of it.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/base.py', 'view_range': [900, 1000]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Perfect! I found the `_prepare_related_fields_for_save` method. This is key to understanding the issue. Let me analyze what it does:
+
+
+1. Lines 918-919: It checks if a field is a relation and if it's cached
+
+2. Lines 928-935: If the related object has no pk, it raises a ValueError
+
+3. Lines 936-939: If the current object's foreign key field (attname) is None, it sets it to the related object's pk
+
+4. Lines 942-943: If the relationship's pk/to_field was changed, it clears the cached relationship
+
+The key issue seems to be in lines 936-
+939. The problem is that when a parent object is assigned a child object that doesn't have a pk yet, the foreign key field (attname) is set to None or empty string initially. Then when the child object gets a pk later, the foreign key field on the parent is only updated in this method if it's None, but apparently it's not getting updated properly.
+
+Let me now look at the ForeignKey field implementation to understand how the attname is handled.
+
+### 👁️ Observation
+<observation>
+
+1. Found the key `_prepare_related_fields_for_save` method in the Model class that handles foreign key relationships during save operations
+
+2. The method has logic to update the foreign key field (attname) if it's None, but there seems to be an issue with how this works when the related object gets its pk after assignment
+
+3. Lines 936-939 show the critical logic: if the foreign key field is None, it sets it to the related object's pk
+
+4. Next action: Examine the ForeignKey field implementation to understand how attname is handled
+</observation>
+
+Now let me examine the ForeignKey field implementation:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [1, 100]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me search for the ForeignKey class definition specifically.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/fields/related.py', 'keywords': ['class ForeignKey']})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me search for ForeignKey in the file.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/fields/related.py', 'keywords': ['ForeignKey']})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me look at the structure of the file to find the ForeignKey definition.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [800, 1000]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Let me search for the ForeignKey class definition earlier in the file.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [700, 800]})
+
+
+## Step 16
+
+### 🤔 Thinking
+Great! I found the ForeignKey class. Now I need to understand how the foreign key field's attname is handled. I can see:
+
+
+1. `get_attname()` method at line 950: returns `'%s_id' % self.name`
+
+2. `get_attname_column()` method at line 953: gets the attname and column name
+
+3. `get_db_prep_save()` method at line 965: handles database preparation of the value
+
+The key issue might be in how the attname is managed when the related object changes. Let me look at the related descriptors file to understand how the field assignments work.
+
+### 👁️ Observation
+<observation>
+
+1. Found the ForeignKey class definition in django/db/models/fields/related.py
+
+2. The ForeignKey field's attname is derived from the field name + "_id" (line 950)
+
+3. Key methods identified:
+   - `get_attname()`: returns field name + "_id" 
+   - `get_db_prep_save()`: handles database value preparation
+   - `get_attname_column()`: returns the attname and column name
+
+4. Next action: Examine the related descriptors to understand how field assignments work
+</observation>
+
+Now let me examine the related descriptors to understand how foreign key assignments work:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_descriptors.py', 'view_range': [1, 100]})
+
+
+## Step 17
+
+### 🤔 Thinking
+I need to see the `__set__` method of the ForwardManyToOneDescriptor, which is likely where the assignment happens. Let me look further into this file.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_descriptors.py', 'view_range': [100, 250]})
+
+
+## Step 18
+
+### 🤔 Thinking
+I need to see the rest of the `__set__` method to understand what happens when a value is assigned.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_descriptors.py', 'view_range': [250, 300]})
+
+
+## Step 19
+
+### 🤔 Thinking
+Perfect! Now I can see the crucial part of the issue. Let me focus on lines 256-257 in the `__set__` method:
+
+
+
+```python
+for lh_field, rh_field in self.field.related_fields:
+    setattr(instance, lh_field.attname, getattr(value, rh_field.attname))
+
+
+```
+
+This is where the issue occurs. When a foreign key is assigned:
+
+1. The `__set__` method is called
+
+2. It sets the foreign key field's attname (e.g., "product_id") to the value of the related object's primary key attname
+
+3. At the time of assignment, if the related object doesn't have a primary key yet, `getattr(value, rh_field.attname)` returns None or empty string (in the case of CharField)
+
+4. This value is then stored in the instance's attribute
+
+The problem is that when the related object later gets its primary key, this assignment doesn't get updated automatically. The `_prepare_related_fields_for_save` method is supposed to handle this case (lines 936-939 in base.py), but it only updates the field if it's None, not if it's an empty string.
+
+Let me now look at some tests to understand the expected behavior and see if there are any existing tests for this scenario.
+
+### 👁️ Observation
+<observation>
+
+1. Found the key issue in the `__set__` method of ForwardManyToOneDescriptor (lines 256-257)
+
+2. When a foreign key is assigned, it immediately sets the foreign key field's attname to the related object's primary key value
+
+3. If the related object doesn't have a pk yet, this sets the attname to None or empty string (for CharField)
+
+4. The `_prepare_related_fields_for_save` method only updates the field if it's None, not if it's an empty string
+
+5. Next action: Search for existing tests related to this issue and examine test cases
+</observation>
+
+Let me search for existing tests related to this issue:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'tests/', 'keywords': ['foreign_key', 'CharField', 'primary_key', 'empty']})
+
+
+## Step 20
+
+### 🤔 Thinking
+Let me look for tests related to foreign key and non-numeric primary keys, specifically looking at tests with CharField primary keys or foreign key issues.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/custom_pk/models.py'})
+
+
+## Step 21
+
+### 🤔 Thinking
+Great! This shows a model with a CharField primary key (Business model with `name` field). Let me look for tests specifically related to this scenario.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/custom_pk/tests.py', 'view_range': [1, 100]})
+
+
+## Step 22
+
+### 🤔 Thinking
+Let me search for more specific tests related to foreign key assignment with CharField primary keys.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'tests/', 'keywords': ['foreign.*key.*save', 'related.*object.*save', 'ForeignKey.*CharField']})
+
+
+## Step 23
+
+### 🤔 Thinking
+Let me look at the many_to_one tests which are likely relevant.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/many_to_one/tests.py', 'view_range': [700, 720]})
+
+
+## Step 24
+
+### 🤔 Thinking
+Let me look at the models to understand the structure better.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/many_to_one/models.py', 'view_range': [1, 100]})
+
+
+## Step 25
+
+### 🤔 Thinking
+I can see that there's a ToFieldChild model that uses a ForeignKey with to_field='name', which points to the Parent model's name field (line 81). This is relevant because the Parent model has a CharField name field that is unique but not a primary key, and ToFieldChild uses it as a foreign key target.
+
+Let me explore the issue more by looking at the ask_repository_agent to understand the current implementation better.
+
+### 👁️ Observation
+<observation>
+
+1. Found relevant test models including Parent and ToFieldChild where ToFieldChild has a ForeignKey to Parent with to_field='name'
+
+2. The Parent model has a unique CharField name field, which is similar to the issue scenario
+
+3. There are tests for caching and foreign key behavior, but I haven't found specific tests for the reported issue
+
+4. Next action: Use repository agent to understand the current implementation and identify the exact root cause
+</observation>
+
+### 🎯 Action
+ask_repository_agent({'query': "How does Django handle foreign key assignment when the related object doesn't have a primary key value at the time of assignment, especially for CharField primary keys? What happens in the _prepare_related_fields_for_save method?"})
+
+
+## Step 26
+
+### 🤔 Thinking
+The repository agent gives me a general understanding but doesn't address the specific issue described. Let me ask more specifically about the problem.
+
+### 🎯 Action
+ask_repository_agent({'query': "In the scenario where a parent object has a foreign key to a child object, and the child object is created without a primary key, then the primary key is set on the child and it's saved, but the parent is saved after. Does Django update the foreign key field (attname) on the parent to reflect the child's new primary key value? What happens when the primary key is a CharField vs an auto field?"})
+
+
+## Step 27
+
+### 🤔 Thinking
+This is very helpful. The repository agent is telling me that:
+
+
+1. Django should correctly update the foreign key column in the database when parent.save() is called
+
+2. The in-memory attribute (attname) may not be updated automatically 
+
+3. The behavior should be consistent regardless of primary key type (CharField vs AutoField)
+
+But the issue description says that for CharField primary keys, the foreign key field gets set to empty string instead of the actual primary key value. This suggests there's a bug in how Django handles the assignment when the primary key is a CharField.
+
+Let me create a test to better understand this issue and trace through the specific problem.
+
+### 🎯 Action
+think({'thought': 'Based on my exploration, I can now analyze the issue:\n\n## Problem Analysis\n\nThe issue is in the `__set__` method of `ForwardManyToOneDescriptor` in django/db/models/fields/related_descriptors.py, specifically lines 256-257:\n\n```python\nfor lh_field, rh_field in self.field.related_fields:\n    setattr(instance, lh_field.attname, getattr(value, rh_field.attname))\n```\n\nWhen a foreign key is assigned:\n
+1. The descriptor\'s `__set__` method is called\n
+2. It immediately sets the foreign key field\'s attname (e.g., "product_id") to the value of the related object\'s primary key attname\n
+3. If the related object doesn\'t have a primary key yet, `getattr(value, rh_field.attname)` returns the default value for that field type\n
+4. For CharField primary keys, this default is an empty string ""\n
+5. For AutoField primary keys, this default is None\n\nThe problem is that when the related object later gets its primary key, the foreign key field on the parent object is not updated automatically.\n\nThe `_prepare_related_fields_for_save` method in django/db/models/base.py (lines 936-939) is supposed to handle this:\n\n```python\nelif getattr(self, field.attname) is None:\n    # Use pk from related object if it has been saved after\n    # an assignment.\n    setattr(self, field.attname, obj.pk)\n```\n\nHowever, this only updates the field if it\'s None. For CharField primary keys, the field gets set to empty string "", not None, so this condition fails and the field is not updated.\n\n## Root Cause\n\nThe root cause is that `_prepare_related_fields_for_save` only checks for None values but doesn\'t handle the case where the foreign key field was set to an empty string (the default for CharField fields) when the related object didn\'t have a primary key.\n\n## Expected Behavior\n\nWhen a foreign key is assigned to an unsaved object, and that object is later saved with a primary key value, the foreign key field should be updated to reflect the correct primary key value regardless of whether it\'s a CharField or AutoField.\n\n## Current Behavior\n\n- For AutoField primary keys: Works correctly because the field is set to None initially, and `_prepare_related_fields_for_save` updates it\n- For CharField primary keys: Fails because the field is set to empty string initially, and `_prepare_related_fields_for_save` doesn\'t update it\n\nThe fix would be to modify `_prepare_related_fields_for_save` to also handle the case where the foreign key field is set to an empty string but the related object now has a primary key.'})
+
+
+## Step 28
+
+### 🤔 Thinking
+Now I have a clear understanding of the issue. Let me provide my final analysis.
+
+### 📋 Conclusion
+<observation>
+
+1. Identified the root cause in the `__set__` method of ForwardManyToOneDescriptor and `_prepare_related_fields_for_save` method
+
+2. The issue is that CharField primary keys get set to empty string "" instead of None when assigned to unsaved objects
+
+3. The `_prepare_related_fields_for_save` method only updates foreign key fields that are None, not empty strings
+
+4. This causes data loss for CharField primary key relationships
+
+5. Ready to provide comprehensive issue analysis
+</observation>
+
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "Django fails to update foreign key field (attname) when the related object with a non-numeric CharField primary key is assigned before the primary key is set, causing the foreign key to be saved with an empty string value instead of the actual primary key value."
+    - status: "yes"
+  </problem_statement>
+  <root_cause>
+    - The root cause is in the interaction between two methods:
+      
+1. `ForwardManyToOneDescriptor.__set__()` in django/db/models/fields/related_descriptors.py (lines 256-257): When a foreign key is assigned to a related object, it immediately sets the foreign key field's attname to the related object's primary key value. If the related object doesn't have a primary key yet, this gets the default value for that field type (empty string for CharField, None for AutoField).
+      
+2. `Model._prepare_related_fields_for_save()` in django/db/models/base.py (lines 936-939): This method is supposed to update foreign key fields if the related object gets a primary key after assignment. However, it only updates fields that are None, not fields that are empty strings.
+    - The bug occurs because CharField primary keys default to empty string "", not None, so the condition `getattr(self, field.attname) is None` fails and the field is not updated.
+  </root_cause>
+  <current_behavior>
+    - Current implementation overview:
+      * django/db/models/fields/related_descriptors.py, ForwardManyToOneDescriptor.__set__() method: Immediately sets foreign key attname to related object's primary key value
+      * django/db/models/base.py, Model._prepare_related_fields_for_save() method: Only updates foreign key fields that are None
+    - Relevant files:
+      * django/db/models/fields/related_descriptors.py (lines 256-257)
+      * django/db/models/base.py (lines 936-939)
+    - Current limitations:
+      * Works correctly for AutoField primary keys (default to None)
+      * Fails for CharField primary keys (default to empty string)
+      * Results in foreign key constraint violations and data loss
+  </current_behavior>
+  <expected_behavior>
+    - Expected behavior after implementing the fix:
+      * Foreign key fields should be updated to reflect the correct primary key value regardless of whether the primary key is CharField or AutoField
+      * The _prepare_related_fields_for_save method should handle both None and empty string values for foreign key fields
+      * No data loss should occur when assigning unsaved objects with CharField primary keys
+    - Affected files:
+      * django/db/models/base.py (Model._prepare_related_fields_for_save method)
+    - Specific behavioral improvements:
+      * The condition in _prepare_related_fields_for_save should be expanded to also check for empty string values when the target field is a CharField
+      * Foreign key assignments should work consistently regardless of primary key field type
+      * Database integrity should be maintained for all primary key types
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 1>
+
+<problem_decoder 2>
+## Step 1
+
+### 🤔 Thinking
+Let me start by reading and understanding the issue description.
+
+The issue is about saving parent objects after setting a child object on them, which leads to data loss for parents with non-numeric primary keys. 
+
+The issue specifically mentions:
+
+1. A model with a foreign key relation to another model that has a non-auto CharField as its primary key
+
+2. When the relation is initialized on the parent with an empty instance that doesn't specify its primary key, and then the primary key is subsequently defined, the parent doesn't "see" the primary key's change
+
+3. The result is that product_id is set to empty string instead of the actual product.sku value
+
+Let me first explore the repository structure to understand the codebase.
+
+### 👁️ Observation
+I'll help you analyze this issue. Let me start by exploring the repository structure to understand the codebase and then dive into the specific problem.
+
+### 🎯 Action
+view_directory({'dir_path': './', 'depth': 2})
+
+
+## Step 2
+
+### 🤔 Thinking
+This is a Django repository. The issue is about foreign key handling in Django ORM. I can see the django/ directory which contains the main Django codebase. Let me examine the django/db directory structure which likely contains the ORM-related code.
+
+### 🎯 Action
+view_directory({'dir_path': './django/db', 'depth': 2})
+
+
+## Step 3
+
+### 🤔 Thinking
+The issue is related to foreign key handling in Django ORM. Based on the issue description, the problem is specifically about how foreign key values are assigned when:
+
+1. A parent object has a foreign key to another model
+
+2. The related model has a non-auto CharField as its primary key
+
+3. The related object is created without specifying its primary key initially, and then the primary key is set later
+
+The key files I should look at are:
+
+1. `django/db/models/fields/related.py` - likely contains ForeignKey implementation
+
+2. `django/db/models/fields/related_descriptors.py` - might contain descriptors for foreign key relationships
+
+3. `django/db/models/base.py` - contains the Model base class
+
+Let me start by examining the related fields module.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [1, 50]})
+
+
+## Step 4
+
+### 🤔 Thinking
+Let me look for the ForeignKey class in this file to understand how foreign keys are handled.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/fields/related.py', 'keywords': ['class ForeignKey', 'def __init__', 'def __set__']})
+
+
+## Step 5
+
+### 🤔 Thinking
+Let me search for ForeignKey class definition more broadly.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/fields/related.py', 'keywords': ['ForeignKey']})
+
+
+## Step 6
+
+### 🤔 Thinking
+That's strange, no ForeignKey found. Let me look at the full file to understand its structure better.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [900, 1050]})
+
+
+## Step 7
+
+### 🤔 Thinking
+Now I can see that `OneToOneField` inherits from `ForeignKey` (line 1027), and there's also a reference to `ForeignKey` in line 
+1020. Let me look earlier in the file to find the ForeignKey class definition.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/fields/related.py', 'keywords': ['class.*ForeignKey']})
+
+
+## Step 8
+
+### 🤔 Thinking
+Let me search more broadly for ForeignKey in the entire related.py file.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [800, 950]})
+
+
+## Step 9
+
+### 🤔 Thinking
+I can see that this is code from inside the ForeignKey class (references to `ForeignKey` in the error messages), but I haven't found the class definition yet. Let me search for the class definition more broadly.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [700, 800]})
+
+
+## Step 10
+
+### 🤔 Thinking
+Perfect! Now I found the ForeignKey class definition starting at line 
+771. Let me examine the related descriptors file since that's where the actual assignment logic is likely to be.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_descriptors.py', 'view_range': [1, 50]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Perfect! This file contains the descriptor classes that handle the actual assignment logic. Let me search for the ForwardManyToOneDescriptor class since that's the one that would handle the assignment when setting `order.product = Product()`.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/fields/related_descriptors.py', 'keywords': ['class ForwardManyToOneDescriptor', 'def __set__']})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me look at the ForwardManyToOneDescriptor class more specifically.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/fields/related_descriptors.py', 'keywords': ['ForwardManyToOneDescriptor']})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me look at the file more thoroughly to find the descriptor classes.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_descriptors.py', 'view_range': [100, 200]})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me continue looking at the file to find the `__set__` method of the descriptor classes.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_descriptors.py', 'view_range': [200, 300]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Perfect! Now I can see the `__set__` method of the `ForwardManyToOneDescriptor` class. The crucial part is on lines 256-257:
+
+
+
+```python
+for lh_field, rh_field in self.field.related_fields:
+    setattr(instance, lh_field.attname, getattr(value, rh_field.attname))
+
+
+```
+
+This code sets the local field (like `product_id`) by getting the value from the related object's field (like `product.sku`). The issue is that when `product.sku` is empty or None at assignment time, it gets that empty/None value, and it doesn't get updated later when `product.sku` is actually set.
+
+Let me look at the beginning of the file to find the class definition and understand the inheritance hierarchy.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_descriptors.py', 'view_range': [80, 120]})
+
+
+## Step 16
+
+### 🤔 Thinking
+Now I have a clear understanding of the issue. Let me also check if there are any tests that might be related to this issue.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'tests', 'keywords': ['foreign_object', 'foreign_key', 'custom_pk', 'null_fk']})
+
+
+## Step 17
+
+### 🤔 Thinking
+Let me look at the custom_pk tests and null_fk tests to understand the existing test cases better.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/custom_pk/tests.py', 'view_range': [1, 50]})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me check the models for custom_pk tests to understand how they're set up.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/custom_pk/models.py'})
+
+
+## Step 19
+
+### 🤔 Thinking
+Let me check if there are any more specific test cases around the issue described. Let me look for any existing tests related to the specific problem. Since the issue mentions that it might be related to validation, let me look at the ask_repository_agent to understand this better.
+
+### 🎯 Action
+ask_repository_agent({'query': 'Are there any existing tests or known issues related to foreign key assignments where the related object has a non-auto primary key that gets set after the foreign key assignment?'})
+
+
+## Step 20
+
+### 🤔 Thinking
+Now let me search for any existing tests that might relate to the specific issue described - where a foreign key gets set to an empty string instead of the correct primary key value.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'tests', 'keywords': ['product_id', 'empty string', 'CharField.*primary_key']})
+
+
+## Step 21
+
+### 🤔 Thinking
+Now I need to understand the issue better. Let me also search for any existing tests that might show the behavior where a foreign key is assigned to an unsaved object with a CharField primary key and then the primary key is set later.
+
+### 🎯 Action
+think({'thought': 'Let me analyze the issue systematically:\n\n
+1. **Problem Statement**: When you have a model with a foreign key to another model that has a non-auto CharField primary key, and you assign an unsaved related object to the foreign key field, and then later set the primary key on the related object, the foreign key field (e.g., product_id) ends up with an empty string instead of the actual primary key value.\n\n
+2. **Current Behavior**: In the `ForwardManyToOneDescriptor.__set__` method (lines 256-257 in related_descriptors.py), when assigning a related object to a foreign key field:\n   ```python\n   for lh_field, rh_field in self.field.related_fields:\n       setattr(instance, lh_field.attname, getattr(value, rh_field.attname))\n   ```\n   \n   This code gets the value from the related object\'s primary key field at assignment time. If the related object\'s primary key is empty/None at that point, the foreign key field gets set to empty/None, and it doesn\'t get updated when the related object\'s primary key is subsequently set.\n\n
+3. **Root Cause**: The issue is that the assignment happens once and doesn\'t track changes to the related object\'s primary key. The foreign key field value is "frozen" at the time of assignment.\n\n
+4. **Expected Behavior**: The foreign key should either:\n   - Get the correct primary key value when the related object is saved\n   - Be updated when the related object\'s primary key changes\n   - Show some kind of warning or error when trying to assign an unsaved object without a primary key\n\nLet me continue exploring the codebase to understand the full flow and find the right place to make the fix.'})
+
+
+## Step 22
+
+### 🤔 Thinking
+Let me check the related_fields property to understand how the foreign key assignment works.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/fields', 'keywords': ['related_fields', 'get_local_related_value', 'get_foreign_related_value']})
+
+
+## Step 23
+
+### 🤔 Thinking
+Let me look at the related_fields property in the related.py file to understand how it works.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [340, 380]})
+
+
+## Step 24
+
+### 🤔 Thinking
+Let me search for the `related_fields` property definition.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/db/models/fields/related.py', 'keywords': ['def related_fields', '@property.*related_fields']})
+
+
+## Step 25
+
+### 🤔 Thinking
+Let me look at the broader context of the related_fields usage to understand it better.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related.py', 'view_range': [600, 700]})
+
+
+## Step 26
+
+### 🤔 Thinking
+Perfect! Now I can see the `related_fields` property is defined at line 631, and it returns the result of `resolve_related_fields()`. I can also see the `get_instance_value_for_fields()` method at line 653 which is used to get the actual values.
+
+The issue is clear now: in the `ForwardManyToOneDescriptor.__set__` method, when setting the foreign key value, it calls `getattr(value, rh_field.attname)` on the related object to get the primary key value. If the related object's primary key is not set yet (None or empty string), that's the value that gets assigned to the foreign key field.
+
+Now I need to understand where this should be fixed. The fix should ensure that when a related object's primary key is later assigned, the foreign key field that references it gets updated as well.
+
+Let me examine the model's save method to understand the flow when objects are saved.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/base.py', 'view_range': [700, 800]})
+
+
+## Step 27
+
+### 🤔 Thinking
+Now I've got a good understanding of the issue. Let me analyze it step by step:
+
+
+1. **Issue Description**: When a parent object has a foreign key to a child object with a CharField primary key, and the child object is initially created without setting the primary key, the foreign key field gets set to an empty string. Even after the primary key is set and the child object is saved, the foreign key field remains empty.
+
+
+2. **Root Cause**: In `ForwardManyToOneDescriptor.__set__()` (line 256-257 in related_descriptors.py), when assigning a related object to a foreign key field, it immediately copies the related object's primary key value to the foreign key field. If the related object's primary key is not set yet, it copies the empty/None value, and this value doesn't get updated later.
+
+
+3. **Expected Behavior**: The foreign key field should be updated with the correct primary key value when the related object is saved.
+
+Now I understand the issue clearly. Let me prepare the issue analysis.
+
+### 👁️ Observation
+<observation>
+
+1. Found the core issue in `ForwardManyToOneDescriptor.__set__()` method in related_descriptors.py
+
+2. The problem is that foreign key values are "frozen" at assignment time and don't get updated when the related object's primary key is later set
+
+3. Alternative action could have been to examine the Model.save() method to understand the save flow
+
+4. Next action: Provide the comprehensive issue analysis based on my findings
+</observation>
+
+## READING Phase
+
+The issue describes a data loss problem in Django's ORM when working with foreign key relationships. Specifically:
+
+- **Problem**: When assigning an unsaved related object (without a primary key) to a foreign key field, and then later setting the primary key on the related object, the foreign key field remains empty instead of being updated with the correct primary key value.
+
+- **Technical Details**: The issue involves:
+  - A `Product` model with a `CharField` primary key (`sku`)
+  - An `Order` model with a `ForeignKey` to `Product`
+  - Assignment pattern: `order.product = Product()` followed by `order.product.sku = "foo"`
+  - Result: `product_id` field gets set to empty string instead of "foo"
+
+- **Error Manifestation**: The transaction fails with a `ForeignKeyViolation` because there's no Product with an empty string as its primary key.
+
+## EXPLORATION Phase
+
+I've identified the root cause and related components:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/related_descriptors.py', 'view_range': [254, 268]})
+
+
+## Step 28
+
+### 🤔 Thinking
+Perfect! Now I have all the information I need to provide the comprehensive issue analysis. The key finding is that line 257 in `related_descriptors.py` is where the foreign key value gets "frozen" at assignment time.
+
+### 📋 Conclusion
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "When a parent object with a foreign key to a child object having a non-auto CharField primary key is assigned an unsaved child instance, and the child's primary key is subsequently set, the parent's foreign key field retains an empty string instead of being updated with the correct primary key value, leading to ForeignKeyViolation errors."
+    - status: "yes"
+  </problem_statement>
+  <root_cause>
+    The root cause is in the `ForwardManyToOneDescriptor.__set__()` method in `django/db/models/fields/related_descriptors.py` at lines 256-
+257. When a related object is assigned to a foreign key field, the method immediately copies the related object's primary key value to the foreign key field using:
+    
+
+```python
+    for lh_field, rh_field in self.field.related_fields:
+        setattr(instance, lh_field.attname, getattr(value, rh_field.attname))
+    
+
+```
+
+    This creates a "snapshot" of the related object's primary key at assignment time. If the related object's primary key is None or empty string at assignment time, that value gets frozen in the foreign key field and doesn't get updated even when the related object's primary key is later set and the object is saved.
+  </root_cause>
+  <current_behavior>
+    - **Location**: `django/db/models/fields/related_descriptors.py`, `ForwardManyToOneDescriptor.__set__()` method, lines 256-257
+    - **Current Implementation**: The descriptor immediately copies the related object's primary key value to the foreign key field at assignment time
+    - **Files Involved**: 
+      - `django/db/models/fields/related_descriptors.py` (assignment logic)
+      - `django/db/models/fields/related.py` (ForeignKey field definition)
+      - `django/db/models/base.py` (model save logic)
+    - **Limitation**: Foreign key values are "frozen" at assignment time and don't update when the related object's primary key changes
+    - **Edge Cases**: 
+      - Works correctly when related object has primary key set before assignment
+      - Only affects non-auto primary key fields (CharField, UUIDField, etc.)
+      - Causes silent data corruption followed by database constraint violations
+  </current_behavior>
+  <expected_behavior>
+    - **Expected Outcome**: The foreign key field should be updated with the correct primary key value when the related object is saved, or alternatively, should defer the assignment until the related object has a valid primary key
+    - **Affected Files**: 
+      - `django/db/models/fields/related_descriptors.py` (primary fix location)
+      - Potentially `django/db/models/base.py` (save method hooks)
+    - **Behavioral Improvements**: 
+      - Foreign key fields should reflect the current primary key value of related objects
+      - Should prevent silent data corruption
+      - Should either update foreign key values when related objects are saved or provide clear error messages
+      - Should maintain data integrity for non-auto primary key scenarios
+    - **Method Changes**: The `__set__` method in `ForwardManyToOneDescriptor` needs to either defer the assignment or establish a mechanism to update foreign key values when related object primary keys change
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 2>
+
+<solution_mapper 0>
+## Step 1
+
+### 🤔 Thinking
+Let me break down the problem and analyze the issue step by step:
+
+
+1. The issue is that when a parent object with a foreign key to a child object having a non-auto CharField primary key is assigned an unsaved child instance, the foreign key field gets 'frozen' with an empty string value at assignment time.
+
+
+2. Even after the child's primary key is subsequently set and saved, the parent's foreign key field retains the empty string instead of being updated with the correct primary key value.
+
+
+3. This leads to database integrity violations and ForeignKeyViolation errors.
+
+The root cause involves:
+- Assignment-time issue: In `ForwardManyToOneDescriptor.__set__()` method, when a related object is assigned to a foreign key field, the method immediately "freezes" the foreign key value by copying the related object's current primary key value.
+- Save-time issue: In `Model._prepare_related_fields_for_save()` method, the method only updates foreign key fields that are None, which works for AutoField primary keys but fails for CharField primary keys.
+
+I need to:
+
+1. First explore the repository to understand the codebase structure
+
+2. Find the relevant files mentioned in the problem description 
+
+3. Create a reproduction script to verify the issue
+
+4. Analyze the root cause and propose a fix
+
+Let me start by exploring the repository structure.
+
+### 👁️ Observation
+I'll help you map a solution to this problem. Let me start by exploring the repository structure and understanding the codebase.
+
+## 
+1. EXPLORATION
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Great! I can see this is a Django repository. Based on the issue description, I need to look at the files mentioned in the problem statement:
+
+1. `django/db/models/fields/related_descriptors.py` - ForwardManyToOneDescriptor.__set__ method
+
+2. `django/db/models/base.py` - Model._prepare_related_fields_for_save method
+
+3. `django/db/models/fields/related.py` - ForeignKey field implementation
+
+Let me start by exploring these files to understand the current implementation.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/fields/related_descriptors.py', 'view_range': [250, 270]})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I found the exact issue. In lines 256-257, the code is setting the foreign key field value by copying the related object's primary key value:
+
+
+
+```python
+for lh_field, rh_field in self.field.related_fields:
+    setattr(instance, lh_field.attname, getattr(value, rh_field.attname))
+
+
+```
+
+This is the "freezing" behavior described in the issue. When a related object is assigned, it immediately copies the primary key value, which could be empty string for CharField primary keys.
+
+Let me check the `_prepare_related_fields_for_save` method in the base model.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/base.py', 'view_range': [930, 950]})
+
+
+## Step 4
+
+### 🤔 Thinking
+Great! Here's the problematic line 936:
+
+
+
+```python
+elif getattr(self, field.attname) is None:
+
+
+```
+
+This condition only checks if the foreign key field is None, but for CharField primary keys, the default value is an empty string, not None. So this condition never matches and the foreign key field is never updated.
+
+Let me search for more context around this method to understand the full implementation.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/base.py', 'view_range': [910, 945]})
+
+
+## Step 5
+
+### 🤔 Thinking
+Perfect! Now I can see the complete `_prepare_related_fields_for_save` method. The issue is clear:
+
+
+1. Line 936 checks: `elif getattr(self, field.attname) is None:`
+
+2. Lines 942-943 check if the relationship's pk/to_field was changed, but this only clears the cached relationship, it doesn't update the foreign key field value.
+
+The problem is that for CharField primary keys, the default value is empty string `""`, not `None`. So the condition on line 936 never matches for CharField primary keys.
+
+However, I also notice lines 942-943 have a check that's almost what we need:
+
+
+```python
+if getattr(obj, field.target_field.attname) != getattr(self, field.attname):
+    field.delete_cached_value(self)
+
+
+```
+
+This checks if the related object's primary key value is different from the foreign key field value, but it only clears the cache instead of updating the foreign key field.
+
+Let me look at some tests to understand how this should behave and then create a reproduction script.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests', 'keywords': ['foreign_key', 'ForeignKey', 'CharField', 'primary_key']})
+
+
+## Step 6
+
+### 🤔 Thinking
+Great! I can see there are many test cases related to foreign keys and primary keys. Let me look at some specific test cases to understand the structure better and create a good reproduction script.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/many_to_one/tests.py', 'view_range': [700, 720]})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me look at the models in the many_to_one tests to understand how foreign keys are typically used.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/many_to_one/models.py', 'view_range': [1, 50]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Let me look for models with CharField primary keys to understand the pattern.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests', 'keywords': ['CharField.*primary_key.*True', 'primary_key.*True.*CharField']})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me check one of these models that uses CharField primary keys to understand the pattern.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/custom_pk/models.py', 'view_range': [20, 40]})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me check the entire custom_pk models file.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/custom_pk/models.py'})
+
+
+## Step 11
+
+### 🤔 Thinking
+Perfect! I can see that in the `Business` model, `name` is a CharField with `primary_key=True`. This is exactly what I need to reproduce the issue.
+
+Let me now create a reproduction script that replicates the issue described in the problem statement.
+
+### 👁️ Observation
+## 
+2. REPRODUCTION
+
+Let me create a minimal reproduction script that demonstrates the issue:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './reproduction.py', 'file_text': '#!/usr/bin/env python\n"""\nReproduction script for the issue:\n"Saving parent object after setting on child leads to data loss for parents with non-numeric primary key"\n"""\n\nimport os\nimport sys\nimport django\nfrom django.conf import settings\nfrom django.db import models, transaction\nfrom django.test import TestCase\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            \'default\': {\n                \'ENGINE\': \'django.db.backends.sqlite3\',\n                \'NAME\': \':memory:\',\n            }\n        },\n        INSTALLED_APPS=[\n            \'django.contrib.contenttypes\',\n            \'django.contrib.auth\',\n            \'__main__\',\n        ],\n        SECRET_KEY=\'test-secret-key\',\n        USE_TZ=True,\n    )\n    django.setup()\n\n# Define models for reproduction\nclass Product(models.Model):\n    sku = models.CharField(primary_key=True, max_length=50)\n    name = models.CharField(max_length=100, default="Test Product")\n    \n    class Meta:\n        app_label = \'__main__\'\n\nclass Order(models.Model):\n    product = models.ForeignKey(Product, on_delete=models.CASCADE)\n    quantity = models.IntegerField(default=1)\n    \n    class Meta:\n        app_label = \'__main__\'\n\ndef reproduce_issue():\n    """Reproduce the issue described in the problem statement"""\n    \n    # Create the database tables\n    from django.core.management import execute_from_command_line\n    from django.db import connection\n    \n    with connection.schema_editor() as schema_editor:\n        schema_editor.create_model(Product)\n        schema_editor.create_model(Order)\n    \n    print("=== Reproducing the issue ===")\n    print("Setting up models with CharField primary key...")\n    \n    # Test case 1: The problematic case\n    print("\\nTest case 1: Assigning unsaved Product instance without SKU first")\n    try:\n        with transaction.atomic():\n            order = Order()\n            order.product = Product()  # Product has no SKU yet\n            order.product.sku = "foo"  # Set SKU after assignment\n            order.product.save()\n            print(f"Product saved with SKU: {order.product.sku}")\n            print(f"Order product_id before save: {order.product_id}")\n            order.save()\n            print(f"Order saved successfully")\n            print(f"Order product_id after save: {order.product_id}")\n            \n            # Check the database state\n            empty_sku_orders = Order.objects.filter(product_id="")\n            correct_orders = Order.objects.filter(product=order.product)\n            \n            print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            # These assertions should pass if the issue is fixed\n            assert not empty_sku_orders.exists(), "Should not have orders with empty product_id"\n            assert correct_orders.exists(), "Should have orders with correct product"\n            \n    except Exception as e:\n        print(f"Error occurred: {e}")\n        print(f"This demonstrates the issue - transaction fails with ForeignKeyViolation")\n    \n    # Test case 2: The working case for comparison\n    print("\\nTest case 2: Assigning Product instance with SKU set first")\n    try:\n        with transaction.atomic():\n            order2 = Order()\n            order2.product = Product(sku="bar")  # Set SKU before assignment\n            order2.product.save()\n            print(f"Product saved with SKU: {order2.product.sku}")\n            print(f"Order product_id before save: {order2.product_id}")\n            order2.save()\n            print(f"Order saved successfully")\n            print(f"Order product_id after save: {order2.product_id}")\n            \n            # Check the database state\n            correct_orders = Order.objects.filter(product=order2.product)\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            assert correct_orders.exists(), "Should have orders with correct product"\n            print("Test case 2 passed!")\n            \n    except Exception as e:\n        print(f"Error occurred: {e}")\n    \n    print("\\n=== Summary ===")\n    print("Test case 1 (problematic): Assignment before setting SKU -> fails")\n    print("Test case 2 (working): Setting SKU before assignment -> works")\n\nif __name__ == \'__main__\':\n    reproduce_issue()'})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me run the reproduction script to confirm it reproduces the issue.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Perfect! The reproduction script successfully demonstrates the issue. Let me improve the script to make it more clear and run it again to confirm.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': '            # Check the database state\n            empty_sku_orders = Order.objects.filter(product_id="")\n            correct_orders = Order.objects.filter(product=order.product)\n            \n            print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            # These assertions should pass if the issue is fixed\n            assert not empty_sku_orders.exists(), "Should not have orders with empty product_id"\n            assert correct_orders.exists(), "Should have orders with correct product"', 'new_str': '            # Check the database state\n            empty_sku_orders = Order.objects.filter(product_id="")\n            correct_orders = Order.objects.filter(product=order.product)\n            \n            print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            # These assertions demonstrate the issue\n            if empty_sku_orders.exists():\n                print("ISSUE CONFIRMED: Order has empty product_id instead of correct SKU")\n            if not correct_orders.exists():\n                print("ISSUE CONFIRMED: Cannot find order by its product relationship")'})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me run the updated reproduction script to confirm it clearly demonstrates the issue.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 15
+
+### 🤔 Thinking
+Perfect! The reproduction script confirms the issue. Let me examine what's actually happening in the database to better understand the root cause. Let me update the script to show the actual database state after test case 1.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': '            # Check the database state\n            empty_sku_orders = Order.objects.filter(product_id="")\n            correct_orders = Order.objects.filter(product=order.product)\n            \n            print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            # These assertions demonstrate the issue\n            if empty_sku_orders.exists():\n                print("ISSUE CONFIRMED: Order has empty product_id instead of correct SKU")\n            if not correct_orders.exists():\n                print("ISSUE CONFIRMED: Cannot find order by its product relationship")', 'new_str': '            # Check the database state\n            empty_sku_orders = Order.objects.filter(product_id="")\n            correct_orders = Order.objects.filter(product=order.product)\n            \n            print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            # These assertions demonstrate the issue\n            if empty_sku_orders.exists():\n                print("ISSUE CONFIRMED: Order has empty product_id instead of correct SKU")\n            if not correct_orders.exists():\n                print("ISSUE CONFIRMED: Cannot find order by its product relationship")\n                \n            # Show what\'s in the database\n            print(f"All orders in DB: {Order.objects.count()}")\n            print(f"All products in DB: {Product.objects.count()}")\n            if Order.objects.exists():\n                order_in_db = Order.objects.first()\n                print(f"Order product_id in DB: \'{order_in_db.product_id}\'")\n            if Product.objects.exists():\n                product_in_db = Product.objects.first()\n                print(f"Product SKU in DB: \'{product_in_db.sku}\'")'})
+
+
+## Step 16
+
+### 🤔 Thinking
+Let me run the updated script to see the actual database state.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 17
+
+### 🤔 Thinking
+The script is working correctly and demonstrating the issue. The transaction is failing because of the ForeignKeyViolation, which is expected behavior. Let me remove the transaction.atomic() to see the actual state that gets saved in the database.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': '    try:\n        with transaction.atomic():\n            order = Order()\n            order.product = Product()  # Product has no SKU yet\n            order.product.sku = "foo"  # Set SKU after assignment\n            order.product.save()\n            print(f"Product saved with SKU: {order.product.sku}")\n            print(f"Order product_id before save: {order.product_id}")\n            order.save()\n            print(f"Order saved successfully")\n            print(f"Order product_id after save: {order.product_id}")\n            \n            # Check the database state\n            empty_sku_orders = Order.objects.filter(product_id="")\n            correct_orders = Order.objects.filter(product=order.product)\n            \n            print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            # These assertions demonstrate the issue\n            if empty_sku_orders.exists():\n                print("ISSUE CONFIRMED: Order has empty product_id instead of correct SKU")\n            if not correct_orders.exists():\n                print("ISSUE CONFIRMED: Cannot find order by its product relationship")\n                \n            # Show what\'s in the database\n            print(f"All orders in DB: {Order.objects.count()}")\n            print(f"All products in DB: {Product.objects.count()}")\n            if Order.objects.exists():\n                order_in_db = Order.objects.first()\n                print(f"Order product_id in DB: \'{order_in_db.product_id}\'")\n            if Product.objects.exists():\n                product_in_db = Product.objects.first()\n                print(f"Product SKU in DB: \'{product_in_db.sku}\'")\n            \n    except Exception as e:\n        print(f"Error occurred: {e}")\n        print(f"This demonstrates the issue - transaction fails with ForeignKeyViolation")', 'new_str': '    try:\n        order = Order()\n        order.product = Product()  # Product has no SKU yet\n        order.product.sku = "foo"  # Set SKU after assignment\n        order.product.save()\n        print(f"Product saved with SKU: {order.product.sku}")\n        print(f"Order product_id before save: {order.product_id}")\n        order.save()\n        print(f"Order saved successfully")\n        print(f"Order product_id after save: {order.product_id}")\n        \n        # Check the database state\n        empty_sku_orders = Order.objects.filter(product_id="")\n        correct_orders = Order.objects.filter(product=order.product)\n        \n        print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n        print(f"Orders with correct product: {correct_orders.count()}")\n        \n        # These assertions demonstrate the issue\n        if empty_sku_orders.exists():\n            print("ISSUE CONFIRMED: Order has empty product_id instead of correct SKU")\n        if not correct_orders.exists():\n            print("ISSUE CONFIRMED: Cannot find order by its product relationship")\n            \n        # Show what\'s in the database\n        print(f"All orders in DB: {Order.objects.count()}")\n        print(f"All products in DB: {Product.objects.count()}")\n        if Order.objects.exists():\n            order_in_db = Order.objects.first()\n            print(f"Order product_id in DB: \'{order_in_db.product_id}\'")\n        if Product.objects.exists():\n            product_in_db = Product.objects.first()\n            print(f"Product SKU in DB: \'{product_in_db.sku}\'")\n            \n    except Exception as e:\n        print(f"Error occurred: {e}")\n        print(f"This demonstrates the issue - ForeignKeyViolation")'})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me run the updated script to see what exactly happens when the transaction is not atomic.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 19
+
+### 🤔 Thinking
+Perfect! The reproduction script is working correctly and demonstrating the issue. The foreign key constraint is failing because the order is trying to reference a Product with an empty string SKU, which doesn't exist in the database.
+
+Now I have a clear understanding of the issue:
+
+1. When assigning a Product instance without SKU to an Order, the foreign key field gets set to an empty string (the default value for CharField)
+
+2. Even after setting the SKU and saving the Product, the Order's product_id field is never updated from the empty string
+
+3. When trying to save the Order, it fails with a foreign key constraint violation because there's no Product with an empty string SKU
+
+This confirms the root cause identified in the issue analysis. Now let me proceed with the fix analysis.
+
+### 👁️ Observation
+## 
+3. FIX ANALYSIS
+
+Based on my exploration and reproduction, I can now provide a comprehensive analysis of the issue and the solution.
+
+### 🎯 Action
+think({'thought': 'Now I understand the root cause completely:\n\n
+1. **Assignment-time issue**: In `ForwardManyToOneDescriptor.__set__()`, when a related object is assigned to a foreign key field, the method immediately "freezes" the foreign key value by copying the related object\'s current primary key value. For CharField primary keys, this captures the empty string default value.\n\n
+2. **Save-time issue**: In `Model._prepare_related_fields_for_save()`, the method only updates foreign key fields that are None: `elif getattr(self, field.attname) is None:`. This works for AutoField primary keys (which default to None) but fails for CharField primary keys (which default to empty string).\n\nThe fix should be in the `_prepare_related_fields_for_save` method to handle the case where the foreign key field contains a default value (empty string) from an unsaved related object. The condition should be expanded to check for mismatches between the stored foreign key value and the related object\'s current primary key value.\n\nThe fix should follow these principles:\n- Minimal viable change: fix only at the exact location where the problem occurs\n- Follow existing code patterns: reuse the existing logic but expand the condition\n- Surgical fix: precisely target the root cause rather than make broad changes\n- Preserve existing interfaces: don\'t change core data structures or data flow\n- Prioritize the most direct solution: choose the solution with fewest steps and clearest logic\n\nThe most direct fix would be to modify the condition on line 936 in _prepare_related_fields_for_save to also check if the related object\'s primary key has changed and is different from the stored foreign key value.'})
+
+
+## Step 20
+
+### 🤔 Thinking
+Let me look at the exact code in the _prepare_related_fields_for_save method to understand the current logic and plan the fix.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/base.py', 'view_range': [936, 950]})
+
+
+## Step 21
+
+### 🤔 Thinking
+I can see the issue clearly now. Looking at lines 936-943:
+
+
+1. Line 936: `elif getattr(self, field.attname) is None:` - This only checks if the foreign key field is None
+
+2. Lines 937-939: Updates the foreign key field with the related object's primary key if it's None
+
+3. Lines 942-943: Checks if the related object's primary key is different from the stored foreign key value, but only clears the cache instead of updating the foreign key field
+
+The fix should be to extend the condition in line 936 to also handle the case where the foreign key field doesn't match the related object's primary key (which happens when the related object's primary key was set after assignment).
+
+Let me create a targeted fix that follows the existing code patterns and is minimal.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/base.py', 'view_range': [920, 950]})
+
+
+## Step 22
+
+### 🤔 Thinking
+Now I can see the full context. The issue is clear:
+
+
+1. Lines 936-939: Only update the foreign key field when it's None
+
+2. Lines 942-943: Check if the related object's primary key is different from the stored foreign key value but only clear the cache
+
+The fix should be to combine these two checks. Instead of just checking `getattr(self, field.attname) is None` in line 936, we should also check if `getattr(obj, field.target_field.attname) != getattr(self, field.attname)` to handle the case where the related object's primary key was set after assignment.
+
+Here's the fix plan:
+
+1. Modify the condition in line 936 to also check if the related object's primary key differs from the stored foreign key value
+
+2. This ensures that whenever there's a mismatch between the stored foreign key and the related object's current primary key, the foreign key field gets updated
+
+3. This maintains backward compatibility while fixing the CharField primary key issue
+
+The fix would change line 936 from:
+
+
+```python
+elif getattr(self, field.attname) is None:
+
+
+```
+to:
+
+```python  
+elif getattr(self, field.attname) is None or getattr(obj, field.target_field.attname) != getattr(self, field.attname):
+
+
+```
+
+This is minimal, surgical, and follows existing code patterns.
+
+### 📋 Conclusion
+Based on my thorough analysis, I can now provide the complete solution mapping:
+
+<observation>
+
+1. Found the exact root cause in the `_prepare_related_fields_for_save` method in django/db/models/base.py (line 936)
+
+2. Alternative action could have been to fix the assignment-time behavior in ForwardManyToOneDescriptor.__set__
+
+3. Next action: Implement the targeted fix in the save-time logic since it's more direct and preserves existing behavior
+</observation>
+
+<code_change_plan>
+## Solution Description
+
+The root cause is in the `Model._prepare_related_fields_for_save()` method in `django/db/models/base.py` at line 
+936. The current condition `elif getattr(self, field.attname) is None:` only updates foreign key fields when they are None, which works for AutoField primary keys (default to None) but fails for CharField primary keys (default to empty string).
+
+When a related object is assigned without a primary key, the foreign key field gets "frozen" with the CharField's default value (empty string). Even after the related object's primary key is set and saved, the foreign key field is never updated because the condition only checks for None values.
+
+The fix expands the condition to also check if the related object's primary key differs from the stored foreign key value, ensuring the foreign key field is updated whenever there's a mismatch.
+
+## Fix Analysis
+
+**Root Cause**: The condition `elif getattr(self, field.attname) is None:` in line 936 only handles AutoField primary keys that default to None, but not CharField primary keys that default to empty string.
+
+**Location**: django/db/models/base.py, line 936, in the `_prepare_related_fields_for_save` method
+
+**Best Practices Applied**:
+- **Minimal viable change**: Only modify the exact condition that causes the issue
+- **Follow existing patterns**: Reuse the existing logic for detecting primary key mismatches (lines 942-943)
+- **Surgical fix**: Target the precise location where the problem occurs
+- **Preserve existing interfaces**: No changes to data structures or API
+- **Most direct solution**: Extend the existing condition rather than introducing new abstractions
+
+**Reasoning**: This approach is preferred because:
+
+1. It fixes the issue at the exact point where foreign key fields should be updated
+
+2. It maintains all existing behavior for AutoField primary keys
+
+3. It reuses the existing mismatch detection logic from lines 942-943
+
+4. It requires minimal code changes with maximum impact
+
+5. It follows the existing pattern in the codebase
+
+## Reproduction Script
+
+**Directory**: `./reproduction.py`  
+**Current Output**: Test case 1 fails with "FOREIGN KEY constraint failed" due to empty string product_id  
+**Expected Output**: Test case 1 should pass with correct product_id matching the product's SKU
+
+## Code Changes
+
+./django/db/models/base.py:
+- Change 1: Modify the condition in `_prepare_related_fields_for_save` method (line 936)
+  **Before**: `elif getattr(self, field.attname) is None:`
+  **After**: `elif getattr(self, field.attname) is None or getattr(obj, field.target_field.attname) != getattr(self, field.attname):`
+
+  **Reasoning**: This change expands the condition to handle cases where the foreign key field contains a default value (empty string for CharField) that doesn't match the related object's current primary key. By checking `getattr(obj, field.target_field.attname) != getattr(self, field.attname)`, we ensure the foreign key field is updated whenever there's a mismatch between the stored foreign key value and the related object's current primary key value. This fixes the issue for CharField primary keys while maintaining backward compatibility for AutoField primary keys.
+
+This single-line change resolves the issue by ensuring foreign key fields are properly synchronized with their related objects' primary keys, regardless of the primary key field type.
+</code_change_plan>
+</solution_mapper 0>
+
+<problem_solver 0>
+## Step 1
+
+### 🤔 Thinking
+Let me break down the problem and analyze the issue step by step:
+
+
+1. The issue is that when a parent object with a foreign key to a child object having a non-auto CharField primary key is assigned an unsaved child instance, the foreign key field gets 'frozen' with an empty string value at assignment time.
+
+
+2. Even after the child's primary key is subsequently set and saved, the parent's foreign key field retains the empty string instead of being updated with the correct primary key value.
+
+
+3. This leads to database integrity violations and ForeignKeyViolation errors.
+
+The root cause involves:
+- Assignment-time issue: In `ForwardManyToOneDescriptor.__set__()` method, when a related object is assigned to a foreign key field, the method immediately "freezes" the foreign key value by copying the related object's current primary key value.
+- Save-time issue: In `Model._prepare_related_fields_for_save()` method, the method only updates foreign key fields that are None, which works for AutoField primary keys but fails for CharField primary keys.
+
+I need to:
+
+1. First explore the repository to understand the codebase structure
+
+2. Find the relevant files mentioned in the problem description 
+
+3. Create a reproduction script to verify the issue
+
+4. Analyze the root cause and propose a fix
+
+Let me start by exploring the repository structure.
+
+### 👁️ Observation
+I'll help you map a solution to this problem. Let me start by exploring the repository structure and understanding the codebase.
+
+## 
+1. EXPLORATION
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Great! I can see this is a Django repository. Based on the issue description, I need to look at the files mentioned in the problem statement:
+
+1. `django/db/models/fields/related_descriptors.py` - ForwardManyToOneDescriptor.__set__ method
+
+2. `django/db/models/base.py` - Model._prepare_related_fields_for_save method
+
+3. `django/db/models/fields/related.py` - ForeignKey field implementation
+
+Let me start by exploring these files to understand the current implementation.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/fields/related_descriptors.py', 'view_range': [250, 270]})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I found the exact issue. In lines 256-257, the code is setting the foreign key field value by copying the related object's primary key value:
+
+
+
+```python
+for lh_field, rh_field in self.field.related_fields:
+    setattr(instance, lh_field.attname, getattr(value, rh_field.attname))
+
+
+```
+
+This is the "freezing" behavior described in the issue. When a related object is assigned, it immediately copies the primary key value, which could be empty string for CharField primary keys.
+
+Let me check the `_prepare_related_fields_for_save` method in the base model.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/base.py', 'view_range': [930, 950]})
+
+
+## Step 4
+
+### 🤔 Thinking
+Great! Here's the problematic line 936:
+
+
+
+```python
+elif getattr(self, field.attname) is None:
+
+
+```
+
+This condition only checks if the foreign key field is None, but for CharField primary keys, the default value is an empty string, not None. So this condition never matches and the foreign key field is never updated.
+
+Let me search for more context around this method to understand the full implementation.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/base.py', 'view_range': [910, 945]})
+
+
+## Step 5
+
+### 🤔 Thinking
+Perfect! Now I can see the complete `_prepare_related_fields_for_save` method. The issue is clear:
+
+
+1. Line 936 checks: `elif getattr(self, field.attname) is None:`
+
+2. Lines 942-943 check if the relationship's pk/to_field was changed, but this only clears the cached relationship, it doesn't update the foreign key field value.
+
+The problem is that for CharField primary keys, the default value is empty string `""`, not `None`. So the condition on line 936 never matches for CharField primary keys.
+
+However, I also notice lines 942-943 have a check that's almost what we need:
+
+
+```python
+if getattr(obj, field.target_field.attname) != getattr(self, field.attname):
+    field.delete_cached_value(self)
+
+
+```
+
+This checks if the related object's primary key value is different from the foreign key field value, but it only clears the cache instead of updating the foreign key field.
+
+Let me look at some tests to understand how this should behave and then create a reproduction script.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests', 'keywords': ['foreign_key', 'ForeignKey', 'CharField', 'primary_key']})
+
+
+## Step 6
+
+### 🤔 Thinking
+Great! I can see there are many test cases related to foreign keys and primary keys. Let me look at some specific test cases to understand the structure better and create a good reproduction script.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/many_to_one/tests.py', 'view_range': [700, 720]})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me look at the models in the many_to_one tests to understand how foreign keys are typically used.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/many_to_one/models.py', 'view_range': [1, 50]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Let me look for models with CharField primary keys to understand the pattern.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests', 'keywords': ['CharField.*primary_key.*True', 'primary_key.*True.*CharField']})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me check one of these models that uses CharField primary keys to understand the pattern.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/custom_pk/models.py', 'view_range': [20, 40]})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me check the entire custom_pk models file.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/custom_pk/models.py'})
+
+
+## Step 11
+
+### 🤔 Thinking
+Perfect! I can see that in the `Business` model, `name` is a CharField with `primary_key=True`. This is exactly what I need to reproduce the issue.
+
+Let me now create a reproduction script that replicates the issue described in the problem statement.
+
+### 👁️ Observation
+## 
+2. REPRODUCTION
+
+Let me create a minimal reproduction script that demonstrates the issue:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './reproduction.py', 'file_text': '#!/usr/bin/env python\n"""\nReproduction script for the issue:\n"Saving parent object after setting on child leads to data loss for parents with non-numeric primary key"\n"""\n\nimport os\nimport sys\nimport django\nfrom django.conf import settings\nfrom django.db import models, transaction\nfrom django.test import TestCase\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            \'default\': {\n                \'ENGINE\': \'django.db.backends.sqlite3\',\n                \'NAME\': \':memory:\',\n            }\n        },\n        INSTALLED_APPS=[\n            \'django.contrib.contenttypes\',\n            \'django.contrib.auth\',\n            \'__main__\',\n        ],\n        SECRET_KEY=\'test-secret-key\',\n        USE_TZ=True,\n    )\n    django.setup()\n\n# Define models for reproduction\nclass Product(models.Model):\n    sku = models.CharField(primary_key=True, max_length=50)\n    name = models.CharField(max_length=100, default="Test Product")\n    \n    class Meta:\n        app_label = \'__main__\'\n\nclass Order(models.Model):\n    product = models.ForeignKey(Product, on_delete=models.CASCADE)\n    quantity = models.IntegerField(default=1)\n    \n    class Meta:\n        app_label = \'__main__\'\n\ndef reproduce_issue():\n    """Reproduce the issue described in the problem statement"""\n    \n    # Create the database tables\n    from django.core.management import execute_from_command_line\n    from django.db import connection\n    \n    with connection.schema_editor() as schema_editor:\n        schema_editor.create_model(Product)\n        schema_editor.create_model(Order)\n    \n    print("=== Reproducing the issue ===")\n    print("Setting up models with CharField primary key...")\n    \n    # Test case 1: The problematic case\n    print("\\nTest case 1: Assigning unsaved Product instance without SKU first")\n    try:\n        with transaction.atomic():\n            order = Order()\n            order.product = Product()  # Product has no SKU yet\n            order.product.sku = "foo"  # Set SKU after assignment\n            order.product.save()\n            print(f"Product saved with SKU: {order.product.sku}")\n            print(f"Order product_id before save: {order.product_id}")\n            order.save()\n            print(f"Order saved successfully")\n            print(f"Order product_id after save: {order.product_id}")\n            \n            # Check the database state\n            empty_sku_orders = Order.objects.filter(product_id="")\n            correct_orders = Order.objects.filter(product=order.product)\n            \n            print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            # These assertions should pass if the issue is fixed\n            assert not empty_sku_orders.exists(), "Should not have orders with empty product_id"\n            assert correct_orders.exists(), "Should have orders with correct product"\n            \n    except Exception as e:\n        print(f"Error occurred: {e}")\n        print(f"This demonstrates the issue - transaction fails with ForeignKeyViolation")\n    \n    # Test case 2: The working case for comparison\n    print("\\nTest case 2: Assigning Product instance with SKU set first")\n    try:\n        with transaction.atomic():\n            order2 = Order()\n            order2.product = Product(sku="bar")  # Set SKU before assignment\n            order2.product.save()\n            print(f"Product saved with SKU: {order2.product.sku}")\n            print(f"Order product_id before save: {order2.product_id}")\n            order2.save()\n            print(f"Order saved successfully")\n            print(f"Order product_id after save: {order2.product_id}")\n            \n            # Check the database state\n            correct_orders = Order.objects.filter(product=order2.product)\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            assert correct_orders.exists(), "Should have orders with correct product"\n            print("Test case 2 passed!")\n            \n    except Exception as e:\n        print(f"Error occurred: {e}")\n    \n    print("\\n=== Summary ===")\n    print("Test case 1 (problematic): Assignment before setting SKU -> fails")\n    print("Test case 2 (working): Setting SKU before assignment -> works")\n\nif __name__ == \'__main__\':\n    reproduce_issue()'})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me run the reproduction script to confirm it reproduces the issue.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Perfect! The reproduction script successfully demonstrates the issue. Let me improve the script to make it more clear and run it again to confirm.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': '            # Check the database state\n            empty_sku_orders = Order.objects.filter(product_id="")\n            correct_orders = Order.objects.filter(product=order.product)\n            \n            print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            # These assertions should pass if the issue is fixed\n            assert not empty_sku_orders.exists(), "Should not have orders with empty product_id"\n            assert correct_orders.exists(), "Should have orders with correct product"', 'new_str': '            # Check the database state\n            empty_sku_orders = Order.objects.filter(product_id="")\n            correct_orders = Order.objects.filter(product=order.product)\n            \n            print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            # These assertions demonstrate the issue\n            if empty_sku_orders.exists():\n                print("ISSUE CONFIRMED: Order has empty product_id instead of correct SKU")\n            if not correct_orders.exists():\n                print("ISSUE CONFIRMED: Cannot find order by its product relationship")'})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me run the updated reproduction script to confirm it clearly demonstrates the issue.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 15
+
+### 🤔 Thinking
+Perfect! The reproduction script confirms the issue. Let me examine what's actually happening in the database to better understand the root cause. Let me update the script to show the actual database state after test case 1.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': '            # Check the database state\n            empty_sku_orders = Order.objects.filter(product_id="")\n            correct_orders = Order.objects.filter(product=order.product)\n            \n            print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            # These assertions demonstrate the issue\n            if empty_sku_orders.exists():\n                print("ISSUE CONFIRMED: Order has empty product_id instead of correct SKU")\n            if not correct_orders.exists():\n                print("ISSUE CONFIRMED: Cannot find order by its product relationship")', 'new_str': '            # Check the database state\n            empty_sku_orders = Order.objects.filter(product_id="")\n            correct_orders = Order.objects.filter(product=order.product)\n            \n            print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            # These assertions demonstrate the issue\n            if empty_sku_orders.exists():\n                print("ISSUE CONFIRMED: Order has empty product_id instead of correct SKU")\n            if not correct_orders.exists():\n                print("ISSUE CONFIRMED: Cannot find order by its product relationship")\n                \n            # Show what\'s in the database\n            print(f"All orders in DB: {Order.objects.count()}")\n            print(f"All products in DB: {Product.objects.count()}")\n            if Order.objects.exists():\n                order_in_db = Order.objects.first()\n                print(f"Order product_id in DB: \'{order_in_db.product_id}\'")\n            if Product.objects.exists():\n                product_in_db = Product.objects.first()\n                print(f"Product SKU in DB: \'{product_in_db.sku}\'")'})
+
+
+## Step 16
+
+### 🤔 Thinking
+Let me run the updated script to see the actual database state.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 17
+
+### 🤔 Thinking
+The script is working correctly and demonstrating the issue. The transaction is failing because of the ForeignKeyViolation, which is expected behavior. Let me remove the transaction.atomic() to see the actual state that gets saved in the database.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': '    try:\n        with transaction.atomic():\n            order = Order()\n            order.product = Product()  # Product has no SKU yet\n            order.product.sku = "foo"  # Set SKU after assignment\n            order.product.save()\n            print(f"Product saved with SKU: {order.product.sku}")\n            print(f"Order product_id before save: {order.product_id}")\n            order.save()\n            print(f"Order saved successfully")\n            print(f"Order product_id after save: {order.product_id}")\n            \n            # Check the database state\n            empty_sku_orders = Order.objects.filter(product_id="")\n            correct_orders = Order.objects.filter(product=order.product)\n            \n            print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n            print(f"Orders with correct product: {correct_orders.count()}")\n            \n            # These assertions demonstrate the issue\n            if empty_sku_orders.exists():\n                print("ISSUE CONFIRMED: Order has empty product_id instead of correct SKU")\n            if not correct_orders.exists():\n                print("ISSUE CONFIRMED: Cannot find order by its product relationship")\n                \n            # Show what\'s in the database\n            print(f"All orders in DB: {Order.objects.count()}")\n            print(f"All products in DB: {Product.objects.count()}")\n            if Order.objects.exists():\n                order_in_db = Order.objects.first()\n                print(f"Order product_id in DB: \'{order_in_db.product_id}\'")\n            if Product.objects.exists():\n                product_in_db = Product.objects.first()\n                print(f"Product SKU in DB: \'{product_in_db.sku}\'")\n            \n    except Exception as e:\n        print(f"Error occurred: {e}")\n        print(f"This demonstrates the issue - transaction fails with ForeignKeyViolation")', 'new_str': '    try:\n        order = Order()\n        order.product = Product()  # Product has no SKU yet\n        order.product.sku = "foo"  # Set SKU after assignment\n        order.product.save()\n        print(f"Product saved with SKU: {order.product.sku}")\n        print(f"Order product_id before save: {order.product_id}")\n        order.save()\n        print(f"Order saved successfully")\n        print(f"Order product_id after save: {order.product_id}")\n        \n        # Check the database state\n        empty_sku_orders = Order.objects.filter(product_id="")\n        correct_orders = Order.objects.filter(product=order.product)\n        \n        print(f"Orders with empty product_id: {empty_sku_orders.count()}")\n        print(f"Orders with correct product: {correct_orders.count()}")\n        \n        # These assertions demonstrate the issue\n        if empty_sku_orders.exists():\n            print("ISSUE CONFIRMED: Order has empty product_id instead of correct SKU")\n        if not correct_orders.exists():\n            print("ISSUE CONFIRMED: Cannot find order by its product relationship")\n            \n        # Show what\'s in the database\n        print(f"All orders in DB: {Order.objects.count()}")\n        print(f"All products in DB: {Product.objects.count()}")\n        if Order.objects.exists():\n            order_in_db = Order.objects.first()\n            print(f"Order product_id in DB: \'{order_in_db.product_id}\'")\n        if Product.objects.exists():\n            product_in_db = Product.objects.first()\n            print(f"Product SKU in DB: \'{product_in_db.sku}\'")\n            \n    except Exception as e:\n        print(f"Error occurred: {e}")\n        print(f"This demonstrates the issue - ForeignKeyViolation")'})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me run the updated script to see what exactly happens when the transaction is not atomic.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 19
+
+### 🤔 Thinking
+Perfect! The reproduction script is working correctly and demonstrating the issue. The foreign key constraint is failing because the order is trying to reference a Product with an empty string SKU, which doesn't exist in the database.
+
+Now I have a clear understanding of the issue:
+
+1. When assigning a Product instance without SKU to an Order, the foreign key field gets set to an empty string (the default value for CharField)
+
+2. Even after setting the SKU and saving the Product, the Order's product_id field is never updated from the empty string
+
+3. When trying to save the Order, it fails with a foreign key constraint violation because there's no Product with an empty string SKU
+
+This confirms the root cause identified in the issue analysis. Now let me proceed with the fix analysis.
+
+### 👁️ Observation
+## 
+3. FIX ANALYSIS
+
+Based on my exploration and reproduction, I can now provide a comprehensive analysis of the issue and the solution.
+
+### 🎯 Action
+think({'thought': 'Now I understand the root cause completely:\n\n
+1. **Assignment-time issue**: In `ForwardManyToOneDescriptor.__set__()`, when a related object is assigned to a foreign key field, the method immediately "freezes" the foreign key value by copying the related object\'s current primary key value. For CharField primary keys, this captures the empty string default value.\n\n
+2. **Save-time issue**: In `Model._prepare_related_fields_for_save()`, the method only updates foreign key fields that are None: `elif getattr(self, field.attname) is None:`. This works for AutoField primary keys (which default to None) but fails for CharField primary keys (which default to empty string).\n\nThe fix should be in the `_prepare_related_fields_for_save` method to handle the case where the foreign key field contains a default value (empty string) from an unsaved related object. The condition should be expanded to check for mismatches between the stored foreign key value and the related object\'s current primary key value.\n\nThe fix should follow these principles:\n- Minimal viable change: fix only at the exact location where the problem occurs\n- Follow existing code patterns: reuse the existing logic but expand the condition\n- Surgical fix: precisely target the root cause rather than make broad changes\n- Preserve existing interfaces: don\'t change core data structures or data flow\n- Prioritize the most direct solution: choose the solution with fewest steps and clearest logic\n\nThe most direct fix would be to modify the condition on line 936 in _prepare_related_fields_for_save to also check if the related object\'s primary key has changed and is different from the stored foreign key value.'})
+
+
+## Step 20
+
+### 🤔 Thinking
+Let me look at the exact code in the _prepare_related_fields_for_save method to understand the current logic and plan the fix.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/base.py', 'view_range': [936, 950]})
+
+
+## Step 21
+
+### 🤔 Thinking
+I can see the issue clearly now. Looking at lines 936-943:
+
+
+1. Line 936: `elif getattr(self, field.attname) is None:` - This only checks if the foreign key field is None
+
+2. Lines 937-939: Updates the foreign key field with the related object's primary key if it's None
+
+3. Lines 942-943: Checks if the related object's primary key is different from the stored foreign key value, but only clears the cache instead of updating the foreign key field
+
+The fix should be to extend the condition in line 936 to also handle the case where the foreign key field doesn't match the related object's primary key (which happens when the related object's primary key was set after assignment).
+
+Let me create a targeted fix that follows the existing code patterns and is minimal.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/base.py', 'view_range': [920, 950]})
+
+
+## Step 22
+
+### 🤔 Thinking
+Now I can see the full context. The issue is clear:
+
+
+1. Lines 936-939: Only update the foreign key field when it's None
+
+2. Lines 942-943: Check if the related object's primary key is different from the stored foreign key value but only clear the cache
+
+The fix should be to combine these two checks. Instead of just checking `getattr(self, field.attname) is None` in line 936, we should also check if `getattr(obj, field.target_field.attname) != getattr(self, field.attname)` to handle the case where the related object's primary key was set after assignment.
+
+Here's the fix plan:
+
+1. Modify the condition in line 936 to also check if the related object's primary key differs from the stored foreign key value
+
+2. This ensures that whenever there's a mismatch between the stored foreign key and the related object's current primary key, the foreign key field gets updated
+
+3. This maintains backward compatibility while fixing the CharField primary key issue
+
+The fix would change line 936 from:
+
+
+```python
+elif getattr(self, field.attname) is None:
+
+
+```
+to:
+
+```python  
+elif getattr(self, field.attname) is None or getattr(obj, field.target_field.attname) != getattr(self, field.attname):
+
+
+```
+
+This is minimal, surgical, and follows existing code patterns.
+
+### 👁️ Observation
+Based on my thorough analysis, I can now provide the complete solution mapping:
+
+<observation>
+
+1. Found the exact root cause in the `_prepare_related_fields_for_save` method in django/db/models/base.py (line 936)
+
+2. Alternative action could have been to fix the assignment-time behavior in ForwardManyToOneDescriptor.__set__
+
+3. Next action: Implement the targeted fix in the save-time logic since it's more direct and preserves existing behavior
+</observation>
+
+<code_change_plan>
+## Solution Description
+
+The root cause is in the `Model._prepare_related_fields_for_save()` method in `django/db/models/base.py` at line 
+936. The current condition `elif getattr(self, field.attname) is None:` only updates foreign key fields when they are None, which works for AutoField primary keys (default to None) but fails for CharField primary keys (default to empty string).
+
+When a related object is assigned without a primary key, the foreign key field gets "frozen" with the CharField's default value (empty string). Even after the related object's primary key is set and saved, the foreign key field is never updated because the condition only checks for None values.
+
+The fix expands the condition to also check if the related object's primary key differs from the stored foreign key value, ensuring the foreign key field is updated whenever there's a mismatch.
+
+## Fix Analysis
+
+**Root Cause**: The condition `elif getattr(self, field.attname) is None:` in line 936 only handles AutoField primary keys that default to None, but not CharField primary keys that default to empty string.
+
+**Location**: django/db/models/base.py, line 936, in the `_prepare_related_fields_for_save` method
+
+**Best Practices Applied**:
+- **Minimal viable change**: Only modify the exact condition that causes the issue
+- **Follow existing patterns**: Reuse the existing logic for detecting primary key mismatches (lines 942-943)
+- **Surgical fix**: Target the precise location where the problem occurs
+- **Preserve existing interfaces**: No changes to data structures or API
+- **Most direct solution**: Extend the existing condition rather than introducing new abstractions
+
+**Reasoning**: This approach is preferred because:
+
+1. It fixes the issue at the exact point where foreign key fields should be updated
+
+2. It maintains all existing behavior for AutoField primary keys
+
+3. It reuses the existing mismatch detection logic from lines 942-943
+
+4. It requires minimal code changes with maximum impact
+
+5. It follows the existing pattern in the codebase
+
+## Reproduction Script
+
+**Directory**: `./reproduction.py`  
+**Current Output**: Test case 1 fails with "FOREIGN KEY constraint failed" due to empty string product_id  
+**Expected Output**: Test case 1 should pass with correct product_id matching the product's SKU
+
+## Code Changes
+
+./django/db/models/base.py:
+- Change 1: Modify the condition in `_prepare_related_fields_for_save` method (line 936)
+  **Before**: `elif getattr(self, field.attname) is None:`
+  **After**: `elif getattr(self, field.attname) is None or getattr(obj, field.target_field.attname) != getattr(self, field.attname):`
+
+  **Reasoning**: This change expands the condition to handle cases where the foreign key field contains a default value (empty string for CharField) that doesn't match the related object's current primary key. By checking `getattr(obj, field.target_field.attname) != getattr(self, field.attname)`, we ensure the foreign key field is updated whenever there's a mismatch between the stored foreign key value and the related object's current primary key value. This fixes the issue for CharField primary keys while maintaining backward compatibility for AutoField primary keys.
+
+This single-line change resolves the issue by ensuring foreign key fields are properly synchronized with their related objects' primary keys, regardless of the primary key field type.
+</code_change_plan>
+
+
+## Step 23
+
+### 👁️ Observation
+Now let me implement the fix:
+
+## 
+1. FIX IMPLEMENTATION
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './django/db/models/base.py', 'old_str': '                elif getattr(self, field.attname) is None:', 'new_str': '                elif getattr(self, field.attname) is None or getattr(obj, field.target_field.attname) != getattr(self, field.attname):'})
+
+
+## Step 24
+
+### 🤔 Thinking
+Great! I've successfully implemented the fix. The change is minimal and targeted - just expanding the condition to handle cases where the foreign key field contains a default value (empty string for CharField) that doesn't match the related object's current primary key.
+
+Now let me verify that the fix works by running the reproduction script.
+
+### 👁️ Observation
+## 
+2. VERIFICATION
+
+### 2.1 Run reproduction script to verify the fix works
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 25
+
+### 🤔 Thinking
+Excellent! The fix is working perfectly. Let me update the summary message in the reproduction script to reflect the fix has been applied.
+
+### 👁️ Observation
+Perfect! The fix is working correctly. Let me update the summary to reflect that the issue has been resolved:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': '    print("\\n=== Summary ===")\n    print("Test case 1 (problematic): Assignment before setting SKU -> fails")\n    print("Test case 2 (working): Setting SKU before assignment -> works")', 'new_str': '    print("\\n=== Summary ===")\n    print("Test case 1 (fixed): Assignment before setting SKU -> now works!")\n    print("Test case 2 (working): Setting SKU before assignment -> works")'})
+
+
+## Step 26
+
+### 🤔 Thinking
+Let me verify once more that the fix works by running the reproduction script again.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 27
+
+### 🤔 Thinking
+Perfect! The fix is working correctly. Let me also test edge cases and run some existing tests to make sure we haven't broken anything.
+
+### 👁️ Observation
+### 2.2 Add edge cases to test comprehensive coverage
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './test_edge_cases.py', 'file_text': '#!/usr/bin/env python\n"""\nTest edge cases for the foreign key fix\n"""\n\nimport os\nimport sys\nimport django\nfrom django.conf import settings\nfrom django.db import models, transaction\nfrom django.test import TestCase\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            \'default\': {\n                \'ENGINE\': \'django.db.backends.sqlite3\',\n                \'NAME\': \':memory:\',\n            }\n        },\n        INSTALLED_APPS=[\n            \'django.contrib.contenttypes\',\n            \'django.contrib.auth\',\n            \'__main__\',\n        ],\n        SECRET_KEY=\'test-secret-key\',\n        USE_TZ=True,\n    )\n    django.setup()\n\n# Define various models for edge case testing\nclass ProductStr(models.Model):\n    sku = models.CharField(primary_key=True, max_length=50)\n    name = models.CharField(max_length=100, default="Test Product")\n    \n    class Meta:\n        app_label = \'__main__\'\n\nclass ProductUUID(models.Model):\n    id = models.UUIDField(primary_key=True, default=\'00000000-0000-0000-0000-000000000000\')\n    name = models.CharField(max_length=100, default="Test Product")\n    \n    class Meta:\n        app_label = \'__main__\'\n\nclass ProductInt(models.Model):\n    id = models.IntegerField(primary_key=True, default=0)\n    name = models.CharField(max_length=100, default="Test Product")\n    \n    class Meta:\n        app_label = \'__main__\'\n\nclass ProductAuto(models.Model):\n    # Uses AutoField by default\n    name = models.CharField(max_length=100, default="Test Product")\n    \n    class Meta:\n        app_label = \'__main__\'\n\nclass OrderStr(models.Model):\n    product = models.ForeignKey(ProductStr, on_delete=models.CASCADE)\n    quantity = models.IntegerField(default=1)\n    \n    class Meta:\n        app_label = \'__main__\'\n\nclass OrderUUID(models.Model):\n    product = models.ForeignKey(ProductUUID, on_delete=models.CASCADE)\n    quantity = models.IntegerField(default=1)\n    \n    class Meta:\n        app_label = \'__main__\'\n\nclass OrderInt(models.Model):\n    product = models.ForeignKey(ProductInt, on_delete=models.CASCADE)\n    quantity = models.IntegerField(default=1)\n    \n    class Meta:\n        app_label = \'__main__\'\n\nclass OrderAuto(models.Model):\n    product = models.ForeignKey(ProductAuto, on_delete=models.CASCADE)\n    quantity = models.IntegerField(default=1)\n    \n    class Meta:\n        app_label = \'__main__\'\n\ndef test_edge_cases():\n    """Test edge cases for various primary key types"""\n    \n    # Create the database tables\n    from django.db import connection\n    \n    with connection.schema_editor() as schema_editor:\n        schema_editor.create_model(ProductStr)\n        schema_editor.create_model(ProductUUID)\n        schema_editor.create_model(ProductInt)\n        schema_editor.create_model(ProductAuto)\n        schema_editor.create_model(OrderStr)\n        schema_editor.create_model(OrderUUID)\n        schema_editor.create_model(OrderInt)\n        schema_editor.create_model(OrderAuto)\n    \n    print("=== Testing Edge Cases ===")\n    \n    # Test 1: CharField primary key (main fix)\n    print("\\n
+1. Testing CharField primary key (main fix):")\n    try:\n        order = OrderStr()\n        order.product = ProductStr()\n        order.product.sku = "test-sku"\n        order.product.save()\n        print(f"Product SKU: {order.product.sku}")\n        print(f"Order product_id before save: \'{order.product_id}\'")\n        order.save()\n        print(f"Order product_id after save: \'{order.product_id}\'")\n        assert order.product_id == "test-sku"\n        print("✓ CharField primary key test passed")\n    except Exception as e:\n        print(f"✗ CharField primary key test failed: {e}")\n    \n    # Test 2: AutoField primary key (should still work)\n    print("\\n
+2. Testing AutoField primary key (should still work):")\n    try:\n        order = OrderAuto()\n        order.product = ProductAuto()\n        order.product.save()\n        print(f"Product ID: {order.product.id}")\n        print(f"Order product_id before save: {order.product_id}")\n        order.save()\n        print(f"Order product_id after save: {order.product_id}")\n        assert order.product_id == order.product.id\n        print("✓ AutoField primary key test passed")\n    except Exception as e:\n        print(f"✗ AutoField primary key test failed: {e}")\n    \n    # Test 3: IntegerField primary key with default\n    print("\\n
+3. Testing IntegerField primary key with default:")\n    try:\n        order = OrderInt()\n        order.product = ProductInt()\n        order.product.id = 12345\n        order.product.save()\n        print(f"Product ID: {order.product.id}")\n        print(f"Order product_id before save: {order.product_id}")\n        order.save()\n        print(f"Order product_id after save: {order.product_id}")\n        assert order.product_id == 12345\n        print("✓ IntegerField primary key test passed")\n    except Exception as e:\n        print(f"✗ IntegerField primary key test failed: {e}")\n    \n    # Test 4: UUIDField primary key\n    print("\\n
+4. Testing UUIDField primary key:")\n    try:\n        import uuid\n        order = OrderUUID()\n        order.product = ProductUUID()\n        test_uuid = uuid.uuid4()\n        order.product.id = test_uuid\n        order.product.save()\n        print(f"Product ID: {order.product.id}")\n        print(f"Order product_id before save: {order.product_id}")\n        order.save()\n        print(f"Order product_id after save: {order.product_id}")\n        assert order.product_id == test_uuid\n        print("✓ UUIDField primary key test passed")\n    except Exception as e:\n        print(f"✗ UUIDField primary key test failed: {e}")\n    \n    # Test 5: Multiple assignments\n    print("\\n
+5. Testing multiple assignments:")\n    try:\n        order = OrderStr()\n        product1 = ProductStr()\n        product1.sku = "first"\n        product1.save()\n        \n        product2 = ProductStr()\n        product2.sku = "second"\n        product2.save()\n        \n        order.product = product1\n        print(f"First assignment - product_id: \'{order.product_id}\'")\n        order.product = product2\n        print(f"Second assignment - product_id: \'{order.product_id}\'")\n        order.save()\n        print(f"After save - product_id: \'{order.product_id}\'")\n        assert order.product_id == "second"\n        print("✓ Multiple assignments test passed")\n    except Exception as e:\n        print(f"✗ Multiple assignments test failed: {e}")\n    \n    print("\\n=== All edge case tests completed ===")\n\nif __name__ == \'__main__\':\n    test_edge_cases()'})
+
+
+## Step 28
+
+### 🤔 Thinking
+Let me run the edge case tests to ensure comprehensive coverage.
+
+### 🎯 Action
+bash({'command': 'cd . && python test_edge_cases.py'})
+
+
+## Step 29
+
+### 🤔 Thinking
+Excellent! All edge case tests pass, confirming that the fix works correctly for various primary key types and scenarios:
+
+
+1. **CharField primary key**: The main fix works perfectly, updating from empty string to the correct value
+
+2. **AutoField primary key**: Still works as expected, updating from None to the correct value  
+
+3. **IntegerField primary key**: Works correctly, updating from the default value (0) to the correct value
+
+4. **UUIDField primary key**: Works correctly, updating from the default UUID to the correct value
+
+5. **Multiple assignments**: Works correctly, updating to the most recent assignment
+
+The fix is comprehensive and maintains backward compatibility while solving the original issue. Now let me run some existing tests to ensure I haven't broken anything.
+
+### 👁️ Observation
+### 2.3 Run existing related tests
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest tests/many_to_one/tests.py -xvs -k "test_cached_foreign_key" --tb=short'})
+
+
+## Step 30
+
+### 🤔 Thinking
+Let me try running the tests with Django's test runner instead.
+
+### 🎯 Action
+bash({'command': 'cd . && python -m django test many_to_one.tests.ManyToOneTests.test_cached_foreign_key_with_to_field_not_cleared_by_save --settings=tests.test_sqlite'})
+
+
+## Step 31
+
+### 🤔 Thinking
+Let me try running tests in a different way by first changing to the tests directory.
+
+### 🎯 Action
+bash({'command': 'cd ./tests && python runtests.py many_to_one.tests.ManyToOneTests.test_cached_foreign_key_with_to_field_not_cleared_by_save --keepdb --verbosity=2'})
+
+
+## Step 32
+
+### 🤔 Thinking
+Great! The related test passes. Let me run a few more tests to make sure I haven't broken anything.
+
+### 🎯 Action
+bash({'command': 'cd ./tests && python runtests.py many_to_one.tests.ManyToOneTests.test_cached_foreign_key_deleted_by_save --keepdb --verbosity=2'})
+
+
+## Step 33
+
+### 🤔 Thinking
+Let me check where the tests directory is located.
+
+### 🎯 Action
+bash({'command': 'ls -la tests/many_to_one/tests.py'})
+
+
+## Step 34
+
+### 🤔 Thinking
+Let me check if the tests exist in the correct directory.
+
+### 🎯 Action
+bash({'command': 'find . -name "test*.py" | grep many_to_one | head -5'})
+
+
+## Step 35
+
+### 🤔 Thinking
+It seems the tests directory structure is different from what I expected. Let me try running some tests from the current directory instead.
+
+### 🎯 Action
+bash({'command': 'cd . && python -m django test many_to_one.tests.ManyToOneTests.test_cached_foreign_key_deleted_by_save --settings=django.conf.global_settings --keepdb --verbosity=2'})
+
+
+## Step 36
+
+### 🤔 Thinking
+Let me try a different approach. I'll run tests directly from the test directory using the proper test runner.
+
+### 🎯 Action
+bash({'command': 'cd tests && python runtests.py many_to_one.tests.ManyToOneTests.test_cached_foreign_key_deleted_by_save --keepdb --verbosity=2'})
+
+
+## Step 37
+
+### 🤔 Thinking
+Let me check where tests are located.
+
+### 🎯 Action
+bash({'command': 'find . -name "runtests.py" -type f'})
+
+
+## Step 38
+
+### 🤔 Thinking
+Now let me try from the root directory using the proper test runner.
+
+### 🎯 Action
+bash({'command': 'cd . && python runtests.py many_to_one.tests.ManyToOneTests.test_cached_foreign_key_deleted_by_save --keepdb --verbosity=2'})
+
+
+## Step 39
+
+### 🤔 Thinking
+Let me find the actual test method names in the many_to_one tests.
+
+### 🎯 Action
+bash({'command': 'cd . && grep -n "def test_" tests/many_to_one/tests.py | head -10'})
+
+
+## Step 40
+
+### 🤔 Thinking
+Let me check the test file structure.
+
+### 🎯 Action
+bash({'command': 'ls -la many_to_one/'})
+
+
+## Step 41
+
+### 🤔 Thinking
+Let me check what tests are available in the many_to_one tests file.
+
+### 🎯 Action
+bash({'command': 'cd . && grep -n "def test_" many_to_one/tests.py | head -10'})
+
+
+## Step 42
+
+### 🤔 Thinking
+Let me run one of the existing tests to make sure the fix doesn't break anything.
+
+### 🎯 Action
+bash({'command': 'cd . && python runtests.py many_to_one.tests.ManyToOneTests.test_assign --keepdb --verbosity=2'})
+
+
+## Step 43
+
+### 🤔 Thinking
+Great! Let me run a few more tests to make sure I haven't broken anything.
+
+### 🎯 Action
+bash({'command': 'cd . && python runtests.py many_to_one.tests.ManyToOneTests.test_assign_fk_id_value --keepdb --verbosity=2'})
+
+
+## Step 44
+
+### 🤔 Thinking
+Perfect! Let me run one more test to ensure the fix is working correctly across different scenarios.
+
+### 🎯 Action
+bash({'command': 'cd . && python runtests.py many_to_one.tests.ManyToOneTests.test_assign_fk_id_none --keepdb --verbosity=2'})
+
+
+## Step 45
+
+### 🤔 Thinking
+Excellent! Let me run custom_pk tests to ensure the fix works well with CharField primary keys.
+
+### 🎯 Action
+bash({'command': 'cd . && python runtests.py custom_pk --keepdb --verbosity=2'})
+
+
+## Step 46
+
+### 🤔 Thinking
+Excellent! All the custom_pk tests pass, which indicates that the fix is working correctly with CharField primary keys and hasn't broken any existing functionality.
+
+Let me now create a comprehensive test for the specific issue that was reported to ensure it's covered by tests.
+
+### 👁️ Observation
+### 2.4 Create comprehensive test for the specific reported issue
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './test_issue_fix.py', 'file_text': '#!/usr/bin/env python\n"""\nTest for the specific issue reported in the GitHub issue:\n"Saving parent object after setting on child leads to data loss for parents with non-numeric primary key"\n"""\n\nimport os\nimport sys\nimport django\nfrom django.conf import settings\nfrom django.db import models, transaction\nfrom django.test import TestCase\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            \'default\': {\n                \'ENGINE\': \'django.db.backends.sqlite3\',\n                \'NAME\': \':memory:\',\n            }\n        },\n        INSTALLED_APPS=[\n            \'django.contrib.contenttypes\',\n            \'django.contrib.auth\',\n            \'__main__\',\n        ],\n        SECRET_KEY=\'test-secret-key\',\n        USE_TZ=True,\n    )\n    django.setup()\n\n# Define exact models from the issue description\nclass Product(models.Model):\n    sku = models.CharField(primary_key=True, max_length=50)\n    \n    class Meta:\n        app_label = \'__main__\'\n\nclass Order(models.Model):\n    product = models.ForeignKey(Product, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = \'__main__\'\n\ndef test_issue_fix():\n    """\n    Test the exact scenario described in the GitHub issue to ensure it\'s fixed.\n    """\n    # Create the database tables\n    from django.db import connection\n    \n    with connection.schema_editor() as schema_editor:\n        schema_editor.create_model(Product)\n        schema_editor.create_model(Order)\n    \n    print("=== Testing the exact issue from GitHub ===")\n    \n    # Test case 1: The problematic scenario from the issue\n    print("\\n
+1. Testing the exact problematic scenario:")\n    print("   order = Order()")\n    print("   order.product = Product()")\n    print("   order.product.sku = \'foo\'")\n    print("   order.product.save()")\n    print("   order.save()")\n    \n    try:\n        with transaction.atomic():\n            order = Order()\n            order.product = Product()\n            order.product.sku = "foo"\n            order.product.save()\n            order.save()\n            \n            # Verify the fix works\n            assert Order.objects.filter(product_id="").count() == 0, "No orders should have empty product_id"\n            assert Order.objects.filter(product=order.product).count() == 1, "Order should be found by product relationship"\n            \n            print("✓ Issue FIXED: Order was saved successfully with correct product_id")\n            print(f"   Order product_id: \'{order.product_id}\'")\n            print(f"   Product SKU: \'{order.product.sku}\'")\n            print(f"   product_id matches SKU: {order.product_id == order.product.sku}")\n            \n    except Exception as e:\n        print(f"✗ Issue NOT FIXED: {e}")\n        \n    # Test case 2: The working scenario for comparison\n    print("\\n
+2. Testing the working scenario (SKU set before assignment):")\n    print("   order2 = Order()")\n    print("   order2.product = Product(sku=\'bar\')")\n    print("   order2.product.save()")\n    print("   order2.save()")\n    \n    try:\n        with transaction.atomic():\n            order2 = Order()\n            order2.product = Product(sku="bar")\n            order2.product.save()\n            order2.save()\n            \n            # Verify this still works\n            assert Order.objects.filter(product=order2.product).count() == 1, "Order should be found by product relationship"\n            \n            print("✓ Working scenario still works correctly")\n            print(f"   Order product_id: \'{order2.product_id}\'")\n            print(f"   Product SKU: \'{order2.product.sku}\'")\n            \n    except Exception as e:\n        print(f"✗ Working scenario broken: {e}")\n    \n    # Test case 3: Multiple field updates after assignment\n    print("\\n
+3. Testing multiple field updates after assignment:")\n    print("   order3 = Order()")\n    print("   order3.product = Product()")\n    print("   order3.product.sku = \'initial\'")\n    print("   order3.product.save()")\n    print("   order3.product.sku = \'updated\'")\n    print("   order3.product.save()")\n    print("   order3.save()")\n    \n    try:\n        with transaction.atomic():\n            order3 = Order()\n            order3.product = Product()\n            order3.product.sku = "initial"\n            order3.product.save()\n            order3.product.sku = "updated"\n            order3.product.save()\n            order3.save()\n            \n            # Verify the fix works with multiple updates\n            assert Order.objects.filter(product=order3.product).count() == 1, "Order should be found by product relationship"\n            assert order3.product_id == "updated", "Foreign key should be updated to the latest value"\n            \n            print("✓ Multiple updates work correctly")\n            print(f"   Order product_id: \'{order3.product_id}\'")\n            print(f"   Product SKU: \'{order3.product.sku}\'")\n            \n    except Exception as e:\n        print(f"✗ Multiple updates failed: {e}")\n    \n    # Test case 4: Edge case - reassignment after save\n    print("\\n
+4. Testing reassignment after save:")\n    print("   order4 = Order()")\n    print("   product_a = Product(sku=\'product_a\')")\n    print("   product_a.save()")\n    print("   order4.product = product_a")\n    print("   order4.save()")\n    print("   product_b = Product(sku=\'product_b\')")\n    print("   product_b.save()")\n    print("   order4.product = product_b")\n    print("   order4.save()")\n    \n    try:\n        with transaction.atomic():\n            order4 = Order()\n            product_a = Product(sku="product_a")\n            product_a.save()\n            order4.product = product_a\n            order4.save()\n            \n            product_b = Product(sku="product_b")\n            product_b.save()\n            order4.product = product_b\n            order4.save()\n            \n            # Verify reassignment works\n            assert order4.product_id == "product_b", "Foreign key should be updated to the new product"\n            assert Order.objects.filter(product=order4.product).count() == 1, "Order should be found by new product relationship"\n            \n            print("✓ Reassignment works correctly")\n            print(f"   Order product_id: \'{order4.product_id}\'")\n            print(f"   Product SKU: \'{order4.product.sku}\'")\n            \n    except Exception as e:\n        print(f"✗ Reassignment failed: {e}")\n    \n    print("\\n=== All tests completed ===")\n\nif __name__ == \'__main__\':\n    test_issue_fix()'})
+
+
+## Step 47
+
+### 🤔 Thinking
+Let me run this comprehensive test to ensure the fix works for all scenarios.
+
+### 🎯 Action
+bash({'command': 'cd . && python test_issue_fix.py'})
+
+
+## Step 48
+
+### 🤔 Thinking
+Let me check if the file was created correctly.
+
+### 🎯 Action
+bash({'command': 'ls -la test_issue_fix.py'})
+
+
+## Step 49
+
+### 🤔 Thinking
+Let me create the file in a different way.
+
+### 🎯 Action
+bash({'command': 'cd . && ls -la *.py | grep test'})
+
+
+## Step 50
+
+### 🤔 Thinking
+Let me check the current directory and make sure the test file is created in the right place.
+
+### 🎯 Action
+bash({'command': 'pwd && ls -la test_*.py'})
+
+
+## Step 51
+
+### 🤔 Thinking
+I see the issue - I'm in the tests directory, not the root directory. Let me go back to the root directory.
+
+### 🎯 Action
+bash({'command': 'cd /testbed && ls -la test_*.py'})
+
+
+## Step 52
+
+### 🤔 Thinking
+Great! The file is in the root directory. Let me run it from there.
+
+### 🎯 Action
+bash({'command': 'cd /testbed && python test_issue_fix.py'})
+
+
+## Step 53
+
+### 🤔 Thinking
+Perfect! All the comprehensive tests pass, confirming that the fix works correctly for:
+
+1. The exact issue scenario described in the GitHub issue
+
+2. The working scenario (to ensure backward compatibility)
+
+3. Multiple field updates after assignment
+
+4. Reassignment after save
+
+This shows that the fix is comprehensive and doesn't break existing functionality. Let me run the original reproduction script one more time to confirm the fix.
+
+### 🎯 Action
+bash({'command': 'cd /testbed && python reproduction.py'})
+
+
+## Step 54
+
+### 🤔 Thinking
+Excellent! The fix is working perfectly. Now let me run a few more existing tests to ensure I haven't broken anything.
+
+### 🎯 Action
+bash({'command': 'cd /testbed && python runtests.py model_fields.test_foreignkey --keepdb --verbosity=2'})
+
+
+## Step 55
+
+### 🤔 Thinking
+Let me check if there is a test runner in the root directory.
+
+### 🎯 Action
+bash({'command': 'cd /testbed && find . -name "runtests.py" -type f'})
+
+
+## Step 56
+
+### 🤔 Thinking
+Let me run the tests from the tests directory.
+
+### 🎯 Action
+bash({'command': 'cd /testbed/tests && python runtests.py model_fields.test_foreignkey --keepdb --verbosity=2'})
+
+
+## Step 57
+
+### 🤔 Thinking
+Great! All the foreign key tests pass. Let me also run a broader test to check for any regressions.
+
+### 🎯 Action
+bash({'command': 'cd /testbed/tests && python runtests.py many_to_one custom_pk --keepdb --verbosity=1'})
+
+
+## Step 58
+
+### 🤔 Thinking
+Perfect! All tests pass, including the many_to_one and custom_pk tests. This confirms that:
+
+
+1. The fix is working correctly for the reported issue
+
+2. All existing functionality is preserved (no regressions)
+
+3. The fix works across different primary key types and scenarios
+
+Let me make a final check to ensure the fix is robust by testing with additional scenarios that might be affected.
+
+### 👁️ Observation
+## 
+3. FINAL REVIEW
+
+### 3.1 Carefully re-read the issue description and ensure all requirements are met
+
+Let me review the original issue:
+
+
+1. **Issue**: When a parent object with a foreign key to a child object having a non-auto CharField primary key is assigned an unsaved child instance, the foreign key field gets 'frozen' with an empty string value at assignment time.
+
+
+2. **Expected outcome**: The foreign key field should be updated with the correct primary key value when the related object is saved.
+
+
+3. **Test cases from the issue**:
+   - ❌ **Problematic case**: `order.product = Product()` → `order.product.sku = "foo"` → `order.product.save()` → `order.save()` → Should work
+   - ✅ **Working case**: `order.product = Product(sku="foo")` → `order.product.save()` → `order.save()` → Should work
+
+**✅ VERIFIED**: Both test cases now work correctly with the fix.
+
+### 3.2 Run tests related to the issue, files modified, and functions changed
+
+### 🎯 Action
+bash({'command': 'cd /testbed/tests && python runtests.py model_fields.test_foreignkey.ForeignKeyTests.test_empty_string_fk --keepdb --verbosity=2'})
+
+
+## Step 59
+
+### 🤔 Thinking
+Perfect! The test `test_empty_string_fk` passes, which is specifically relevant to the issue I just fixed. This confirms that the fix doesn't break the existing behavior for handling empty string foreign key values.
+
+Let me now make sure I haven't broken any fundamental functionality by running a few broader tests.
+
+### 🎯 Action
+bash({'command': 'cd /testbed/tests && python runtests.py one_to_one --keepdb --verbosity=1'})
+
+
+## Step 60
+
+### 🤔 Thinking
+Great! Let me run one more comprehensive test suite to make sure the fix doesn't break anything else.
+
+### 🎯 Action
+bash({'command': 'cd /testbed/tests && python runtests.py null_fk --keepdb --verbosity=1'})
+
+
+## Step 61
+
+### 🤔 Thinking
+Perfect! All tests pass. Let me also run the serializers tests to make sure foreign key serialization works correctly.
+
+### 🎯 Action
+bash({'command': 'cd /testbed/tests && python runtests.py serializers.test_natural --keepdb --verbosity=1'})
+
+
+## Step 62
+
+### 🤔 Thinking
+Excellent! All tests pass. Let me now create a final comprehensive summary of what was done and verify that all requirements are met.
+
+### 📋 Conclusion
+## SUMMARY
+
+I have successfully implemented a fix for the issue "Saving parent object after setting on child leads to data loss for parents with non-numeric primary key."
+
+### ✅ **Issue Fixed**
+
+**Problem**: When a parent object with a foreign key to a child object having a non-auto CharField primary key is assigned an unsaved child instance, the foreign key field gets 'frozen' with an empty string value at assignment time, never updating even after the child's primary key is set.
+
+**Solution**: Modified the condition in `Model._prepare_related_fields_for_save()` method to handle cases where the foreign key field contains a default value that doesn't match the related object's current primary key.
+
+### ✅ **Code Changes**
+
+**File**: `django/db/models/base.py`
+**Line**: 936
+**Change**:
+
+
+```python
+# Before
+elif getattr(self, field.attname) is None:
+
+# After  
+elif getattr(self, field.attname) is None or getattr(obj, field.target_field.attname) != getattr(self, field.attname):
+
+
+```
+
+**Reasoning**: This single-line change ensures that foreign key fields are updated whenever there's a mismatch between the stored foreign key value and the related object's current primary key value, regardless of the primary key field type.
+
+### ✅ **Verification Results**
+
+
+1. **Original Issue**: ✅ **FIXED**
+   - Test case 1 (problematic): Assignment before setting SKU → now works!
+   - Test case 2 (working): Setting SKU before assignment → still works!
+
+
+2. **Edge Cases**: ✅ **ALL PASS**
+   - CharField primary key: ✅ Works
+   - AutoField primary key: ✅ Works (backward compatibility maintained)
+   - IntegerField primary key: ✅ Works
+   - UUIDField primary key: ✅ Works
+   - Multiple assignments: ✅ Works
+
+
+3. **Existing Tests**: ✅ **ALL PASS**
+   - many_to_one tests: ✅ Pass
+   - custom_pk tests: ✅ Pass
+   - model_fields.test_foreignkey tests: ✅ Pass
+   - one_to_one tests: ✅ Pass
+   - null_fk tests: ✅ Pass
+   - serializers tests: ✅ Pass
+
+
+4. **Comprehensive Scenarios**: ✅ **ALL PASS**
+   - Exact GitHub issue scenario: ✅ Fixed
+   - Multiple field updates: ✅ Works
+   - Reassignment after save: ✅ Works
+   - All primary key types: ✅ Works
+
+### ✅ **Key Benefits**
+
+
+1. **Minimal Change**: Only one line modified, targeting the exact root cause
+
+2. **Backward Compatible**: All existing functionality preserved
+
+3. **Comprehensive**: Works with all primary key field types
+
+4. **Robust**: Handles edge cases and multiple scenarios
+
+5. **Performance**: No performance impact, uses existing logic patterns
+
+### ✅ **Design Principles Applied**
+
+- **Minimal viable change**: Fixed only at the exact location where the problem occurs
+- **Follow existing patterns**: Reused the existing mismatch detection logic
+- **Surgical fix**: Precisely targeted the root cause
+- **Preserve existing interfaces**: No changes to data structures or API
+- **Most direct solution**: Extended the existing condition rather than broad changes
+
+The fix is complete, thoroughly tested, and ready for production use.
+
+
+The final patch is:
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 2428218696..64805a1672 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -933,7 +933,7 @@ class Model(metaclass=ModelBase):
+                         "%s() prohibited to prevent data loss due to unsaved "
+                         "related object '%s'." % (operation_name, field.name)
+                     )
+-                elif getattr(self, field.attname) is None:
++                elif getattr(self, field.attname) is None or getattr(obj, field.target_field.attname) != getattr(self, field.attname):
+                     # Use pk from related object if it has been saved after
+                     # an assignment.
+                     setattr(self, field.attname, obj.pk)
+</problem_solver 0>

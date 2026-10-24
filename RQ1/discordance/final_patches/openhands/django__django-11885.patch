@@ -1,0 +1,37 @@
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -1,4 +1,33 @@
+             # fast deletes
++            # Group fast deletes by model to combine queries for the same table
++            fast_delete_groups = {}
+             for qs in self.fast_deletes:
+-                count = qs._raw_delete(using=self.using)
+-                deleted_counter[qs.model._meta.label] += count+                model = qs.model
++                if model not in fast_delete_groups:
++                    fast_delete_groups[model] = []
++                fast_delete_groups[model].append(qs)
++            
++            # Execute combined queries for each model
++            for model, querysets in fast_delete_groups.items():
++                if len(querysets) == 1:
++                    # Single queryset, execute as before
++                    count = querysets[0]._raw_delete(using=self.using)
++                    deleted_counter[model._meta.label] += count
++                else:
++                    # Multiple querysets for same model, combine with OR
++                    from django.db.models.sql.where import WhereNode, OR
++                    
++                    # Create a combined WHERE node with OR connector
++                    combined_where = WhereNode()
++                    combined_where.connector = OR
++                    
++                    for qs in querysets:
++                        if qs.query.where:
++                            combined_where.add(qs.query.where, OR)
++                    
++                    if combined_where.children:
++                        # Create a new queryset with combined WHERE conditions
++                        combined_qs = model._default_manager.using(self.using).all()
++                        combined_qs.query.where = combined_where
++                        count = combined_qs._raw_delete(using=self.using)
++                        deleted_counter[model._meta.label] += count

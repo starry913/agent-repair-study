@@ -1,0 +1,127 @@
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fdca700c9d..a805fd7606 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -139,6 +139,47 @@ def compile_json_path(key_transforms, include_root=True):
+     return "".join(path)
+ 
+ 
++def compile_json_path_for_object_keys(key_transforms, include_root=True):
++    """
++    Compile a JSON path for object key access, treating all keys as object keys.
++    This is used for has_key lookups where numeric strings should be treated as 
++    object keys, not array indices.
++    """
++    path = ["$"] if include_root else []
++    for key_transform in key_transforms:
++        path.append(".")
++        path.append(json.dumps(key_transform))
++    return "".join(path)
++
++
++def compile_json_path_for_has_key(key_transforms, include_root=True):
++    """
++    Compile a JSON path for has_key lookups, treating the final key as an object key
++    but intermediate keys following normal rules.
++    """
++    if not key_transforms:
++        return "$" if include_root else ""
++    
++    path = ["$"] if include_root else []
++    
++    # Process all but the last key with normal rules
++    for key_transform in key_transforms[:-1]:
++        try:
++            num = int(key_transform)
++        except ValueError:  # non-integer
++            path.append(".")
++            path.append(json.dumps(key_transform))
++        else:
++            path.append("[%s]" % num)
++    
++    # Process the last key as an object key
++    final_key = key_transforms[-1]
++    path.append(".")
++    path.append(json.dumps(final_key))
++    
++    return "".join(path)
++
++
+ class DataContains(PostgresOperatorLookup):
+     lookup_name = "contains"
+     postgres_operator = "@>"
+@@ -172,7 +213,7 @@ class ContainedBy(PostgresOperatorLookup):
+ class HasKeyLookup(PostgresOperatorLookup):
+     logical_operator = None
+ 
+-    def as_sql(self, compiler, connection, template=None):
++    def as_sql(self, compiler, connection, template=None, treat_rhs_as_object_keys=True):
+         # Process JSON path from the left-hand side.
+         if isinstance(self.lhs, KeyTransform):
+             lhs, lhs_params, lhs_key_transforms = self.lhs.preprocess_lhs(
+@@ -191,13 +232,24 @@ class HasKeyLookup(PostgresOperatorLookup):
+         for key in rhs:
+             if isinstance(key, KeyTransform):
+                 *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++                if treat_rhs_as_object_keys:
++                    # Use has_key path compilation for complex KeyTransform expressions
++                    rhs_path = compile_json_path_for_has_key(rhs_key_transforms, include_root=False)
++                else:
++                    # Use normal path compilation for internal usage (e.g., isnull lookups)
++                    rhs_path = compile_json_path(rhs_key_transforms, include_root=False)
+             else:
+-                rhs_key_transforms = [key]
++                if treat_rhs_as_object_keys:
++                    # For simple string keys, treat them as object keys, not array indices
++                    rhs_path = compile_json_path_for_object_keys([key], include_root=False)
++                else:
++                    # Use normal path compilation for internal usage (e.g., isnull lookups)
++                    rhs_path = compile_json_path([key], include_root=False)
+             rhs_params.append(
+                 "%s%s"
+                 % (
+                     lhs_json_path,
+-                    compile_json_path(rhs_key_transforms, include_root=False),
++                    rhs_path,
+                 )
+             )
+         # Add condition for each key.
+@@ -210,9 +262,10 @@ class HasKeyLookup(PostgresOperatorLookup):
+             compiler, connection, template="JSON_CONTAINS_PATH(%s, 'one', %%s)"
+         )
+ 
+-    def as_oracle(self, compiler, connection):
++    def as_oracle(self, compiler, connection, treat_rhs_as_object_keys=True):
+         sql, params = self.as_sql(
+-            compiler, connection, template="JSON_EXISTS(%s, '%%s')"
++            compiler, connection, template="JSON_EXISTS(%s, '%%s')",
++            treat_rhs_as_object_keys=treat_rhs_as_object_keys
+         )
+         # Add paths directly into SQL because path expressions cannot be passed
+         # as bind variables on Oracle.
+@@ -390,7 +443,7 @@ class KeyTransformIsNull(lookups.IsNull):
+         sql, params = HasKey(
+             self.lhs.lhs,
+             self.lhs.key_name,
+-        ).as_oracle(compiler, connection)
++        ).as_oracle(compiler, connection, treat_rhs_as_object_keys=False)
+         if not self.rhs:
+             return sql, params
+         # Column doesn't have a key or IS NULL.
+@@ -405,6 +458,7 @@ class KeyTransformIsNull(lookups.IsNull):
+             compiler,
+             connection,
+             template=template,
++            treat_rhs_as_object_keys=False,
+         )
+ 
+ 
+@@ -467,7 +521,7 @@ class KeyTransformExact(JSONExact):
+         if rhs_params == ["null"]:
+             # Field has key and it's NULL.
+             has_key_expr = HasKey(self.lhs.lhs, self.lhs.key_name)
+-            has_key_sql, has_key_params = has_key_expr.as_oracle(compiler, connection)
++            has_key_sql, has_key_params = has_key_expr.as_oracle(compiler, connection, treat_rhs_as_object_keys=False)
+             is_null_expr = self.lhs.get_lookup("isnull")(self.lhs, True)
+             is_null_sql, is_null_params = is_null_expr.as_sql(compiler, connection)
+             return (

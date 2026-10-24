@@ -1,0 +1,258 @@
+--- a/django/utils/deprecation.py
++++ b/django/utils/deprecation.py
+@@ -132,6 +132,11 @@
+             )(request)
+         response = response or await self.get_response(request)
+         if hasattr(self, 'process_response'):
++            # Ensure that if the response is a coroutine, it gets awaited before
++            # being passed to process_response. This can happen when middleware
++            # returns coroutines instead of HttpResponse objects.
++            if asyncio.iscoroutine(response):
++                response = await response
+             response = await sync_to_async(
+                 self.process_response,
+                 thread_sensitive=True,
+--- a/compare_middleware.py
++++ b/compare_middleware.py
+@@ -0,0 +1,145 @@
++#!/usr/bin/env python
++"""
++Compare the original middleware behavior with debug version.
++"""
++import asyncio
++import sys
++from pathlib import Path
++
++# Add the testbed path to sys.path to import Django
++sys.path.insert(0, str(Path(__file__).parent))
++
++import django
++from django.conf import settings
++from django.test import AsyncRequestFactory
++from django.core.asgi import get_asgi_application
++from django.utils.deprecation import MiddlewareMixin
++from django.http import JsonResponse
++from django.urls import path
++from asgiref.testing import ApplicationCommunicator
++from asgiref.sync import sync_to_async
++
++class OriginalMiddleware(MiddlewareMixin):
++    def process_response(self, request, response):
++        print(f"OriginalMiddleware.process_response: response type = {type(response)}")
++        print(f"OriginalMiddleware.process_response: response is coroutine = {asyncio.iscoroutine(response)}")
++        if asyncio.iscoroutine(response):
++            print("  *** COROUTINE DETECTED in Original Middleware! ***")
++        return response
++
++class CustomMiddleware(MiddlewareMixin):
++    def process_response(self, request, response):
++        print(f"CustomMiddleware.process_response: response type = {type(response)}")
++        print(f"CustomMiddleware.process_response: response is coroutine = {asyncio.iscoroutine(response)}")
++        if asyncio.iscoroutine(response):
++            print("  *** COROUTINE DETECTED in Custom Middleware! ***")
++        return response
++    
++    async def __acall__(self, request):
++        """Custom async version to debug the issue."""
++        print(f"CustomMiddleware.__acall__ called")
++        
++        response = None
++        if hasattr(self, 'process_request'):
++            response = await sync_to_async(
++                self.process_request,
++                thread_sensitive=True,
++            )(request)
++        
++        print(f"  Before get_response: response = {response}")
++        response = response or await self.get_response(request)
++        print(f"  After get_response: response = {type(response)}, is coroutine = {asyncio.iscoroutine(response)}")
++        
++        if hasattr(self, 'process_response'):
++            print(f"  Before process_response")
++            response = await sync_to_async(
++                self.process_response,
++                thread_sensitive=True,
++            )(request, response)
++            print(f"  After process_response: response = {type(response)}, is coroutine = {asyncio.iscoroutine(response)}")
++        
++        return response
++
++# Test view
++def test_view(request):
++    return JsonResponse({'message': 'Hello World'})
++
++# URL configuration
++urlpatterns = [
++    path('', test_view),
++]
++
++async def test_original_middleware():
++    """Test with original middleware - should show the issue"""
++    print("=== Testing Original Middleware (should show issue) ===")
++    
++    # Reset Django settings
++    settings._wrapped = None
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        MIDDLEWARE=[
++            'compare_middleware.OriginalMiddleware',
++        ],
++        ROOT_URLCONF='compare_middleware',
++        USE_TZ=True,
++    )
++    django.setup()
++    
++    # Get ASGI application
++    application = get_asgi_application()
++    
++    # Create test scope
++    factory = AsyncRequestFactory()
++    scope = factory._base_scope(path='/')
++    
++    # Test the application
++    communicator = ApplicationCommunicator(application, scope)
++    await communicator.send_input({'type': 'http.request'})
++    
++    # Read the response
++    response_start = await communicator.receive_output()
++    response_body = await communicator.receive_output()
++    print(f"Response completed\n")
++
++async def test_custom_middleware():
++    """Test with custom middleware - should work correctly"""
++    print("=== Testing Custom Middleware (should work correctly) ===")
++    
++    # Reset Django settings
++    settings._wrapped = None
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key-2',
++        MIDDLEWARE=[
++            'compare_middleware.CustomMiddleware',
++        ],
++        ROOT_URLCONF='compare_middleware',
++        USE_TZ=True,
++    )
++    django.setup()
++    
++    # Get ASGI application
++    application = get_asgi_application()
++    
++    # Create test scope
++    factory = AsyncRequestFactory()
++    scope = factory._base_scope(path='/')
++    
++    # Test the application
++    communicator = ApplicationCommunicator(application, scope)
++    await communicator.send_input({'type': 'http.request'})
++    
++    # Read the response
++    response_start = await communicator.receive_output()
++    response_body = await communicator.receive_output()
++    print(f"Response completed\n")
++
++if __name__ == '__main__':
++    loop = asyncio.get_event_loop()
++    
++    # Test original middleware
++    loop.run_until_complete(test_original_middleware())
++    
++    # Test custom middleware
++    loop.run_until_complete(test_custom_middleware())
+--- a/trace_coroutine_source.py
++++ b/trace_coroutine_source.py
+@@ -0,0 +1,93 @@
++#!/usr/bin/env python
++"""
++Trace where the coroutine is coming from.
++"""
++import asyncio
++import sys
++from pathlib import Path
++
++# Add the testbed path to sys.path to import Django
++sys.path.insert(0, str(Path(__file__).parent))
++
++import django
++from django.conf import settings
++from django.test import AsyncRequestFactory
++from django.core.asgi import get_asgi_application
++from django.utils.deprecation import MiddlewareMixin
++from django.http import JsonResponse
++from django.urls import path
++from asgiref.testing import ApplicationCommunicator
++from asgiref.sync import sync_to_async
++
++# Monkey patch sync_to_async to add debugging
++original_sync_to_async = sync_to_async
++
++def debug_sync_to_async(func, thread_sensitive=False):
++    """Debug wrapper for sync_to_async"""
++    print(f"DEBUG: sync_to_async called on {func}")
++    
++    async def debug_wrapper(*args, **kwargs):
++        print(f"DEBUG: Calling {func} with args: {[type(arg) for arg in args]}")
++        result = await original_sync_to_async(func, thread_sensitive=thread_sensitive)(*args, **kwargs)
++        print(f"DEBUG: {func} returned: {type(result)}, is coroutine: {asyncio.iscoroutine(result)}")
++        return result
++    
++    return debug_wrapper
++
++# Replace sync_to_async with debug version
++import asgiref.sync
++asgiref.sync.sync_to_async = debug_sync_to_async
++
++class TestMiddleware(MiddlewareMixin):
++    def process_response(self, request, response):
++        print(f"TestMiddleware.process_response: response type = {type(response)}")
++        if asyncio.iscoroutine(response):
++            print("*** ISSUE: Middleware received a coroutine! ***")
++        return response
++
++# Test view
++def test_view(request):
++    return JsonResponse({'message': 'Hello World'})
++
++# URL configuration
++urlpatterns = [
++    path('', test_view),
++]
++
++async def trace_coroutine():
++    """Trace where the coroutine comes from"""
++    print("=== Tracing coroutine source ===")
++    
++    # Configure Django
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        MIDDLEWARE=[
++            'trace_coroutine_source.TestMiddleware',
++            'django.middleware.security.SecurityMiddleware',
++        ],
++        ROOT_URLCONF='trace_coroutine_source',
++        USE_TZ=True,
++    )
++    django.setup()
++    
++    # Get ASGI application
++    application = get_asgi_application()
++    
++    # Create test scope
++    factory = AsyncRequestFactory()
++    scope = factory._base_scope(path='/')
++    
++    # Test the application
++    communicator = ApplicationCommunicator(application, scope)
++    await communicator.send_input({'type': 'http.request'})
++    
++    # Read the response
++    response_start = await communicator.receive_output()
++    response_body = await communicator.receive_output()
++    
++    print(f"Request completed")
++
++if __name__ == '__main__':
++    loop = asyncio.get_event_loop()
++    loop.run_until_complete(trace_coroutine())

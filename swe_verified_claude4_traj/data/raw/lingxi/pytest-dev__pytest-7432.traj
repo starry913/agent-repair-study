@@ -1,0 +1,2475 @@
+<issue_description>
+skipping: --runxfail breaks pytest.mark.skip location reporting
+pytest versions: 5.4.x, current master
+
+When `@pytest.mark.skip`/`skipif` marks are used to skip a test, for example
+
+```py
+import pytest
+@pytest.mark.skip
+def test_skip_location() -> None:
+    assert 0
+```
+
+the expected skip location reported should point to the item itself, and this is indeed what happens when running with `pytest -rs`:
+
+```
+SKIPPED [1] test_it.py:3: unconditional skip
+```
+
+However, adding `pytest -rs --runxfail` breaks this:
+
+```
+SKIPPED [1] src/_pytest/skipping.py:238: unconditional skip
+```
+
+The `--runxfail` is only about xfail and should not affect this at all.
+
+---
+
+Hint: the bug is in `src/_pytest/skipping.py`, the `pytest_runtest_makereport` hook.
+</issue_description>
+
+<problem_decoder 0>
+## Step 1
+
+### 🤔 Thinking
+Let me start by analyzing the issue description to understand what's happening.
+
+The issue is about pytest's skip location reporting. When using `@pytest.mark.skip` or `skipif` marks to skip a test:
+
+
+1. Normally, when running with `pytest -rs`, the skip location reported points to the test item itself (e.g., "test_it.py:3: unconditional skip")
+
+2. However, when adding `--runxfail` flag, the location reporting breaks and points to "src/_pytest/skipping.py:238: unconditional skip" instead of the test location.
+
+The hint indicates that the bug is in `src/_pytest/skipping.py`, specifically in the `pytest_runtest_makereport` hook.
+
+Let me first explore the repository structure to understand how pytest is organized.
+
+### 👁️ Observation
+I'll help you analyze this issue. Let me start by exploring the repository structure and understanding the problem.
+
+## Phase 1: READING
+
+### 🎯 Action
+view_directory({'dir_path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Good, I can see the repository structure. The issue is related to `src/_pytest/skipping.py` as mentioned in the hint. Let me look at the issue description more carefully:
+
+The problem is:
+
+1. When running `pytest -rs` with `@pytest.mark.skip`, the location is correctly reported as pointing to the test item (e.g., "test_it.py:3: unconditional skip")
+
+2. When adding `--runxfail` flag, the location reporting is broken and points to "src/_pytest/skipping.py:238: unconditional skip" instead
+
+The key issue is that `--runxfail` should only affect xfail behavior, not skip behavior, but it's interfering with skip location reporting.
+
+Let me start by examining the `src/_pytest/skipping.py` file since that's where the bug is supposed to be.
+
+### 👁️ Observation
+<observation>
+
+1. Found the pytest repository structure with source code in src/_pytest/
+
+2. The issue mentions the bug is in src/_pytest/skipping.py, specifically in the pytest_runtest_makereport hook
+
+3. The problem is that --runxfail flag is incorrectly affecting skip location reporting when it should only affect xfail behavior
+</observation>
+
+Let me examine the skipping.py file to understand the current implementation:
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/skipping.py'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Now I can see the issue! Looking at the `pytest_runtest_makereport` hook, specifically the part around lines 294-305:
+
+
+
+```python
+elif (
+    item._store.get(skipped_by_mark_key, True)
+    and rep.skipped
+    and type(rep.longrepr) is tuple
+):
+    # skipped by mark.skipif; change the location of the failure
+    # to point to the item definition, otherwise it will display
+    # the location of where the skip exception was raised within pytest
+    _, _, reason = rep.longrepr
+    filename, line = item.reportinfo()[:2]
+    assert line is not None
+    rep.longrepr = str(filename), line + 1, reason
+
+
+```
+
+This is the code that corrects the skip location to point to the test item itself instead of the internal pytest code. However, there's a problem with the condition on line 295:
+
+`item._store.get(skipped_by_mark_key, True)`
+
+The problem is that when `--runxfail` is used, there's an `elif item.config.option.runxfail: pass` branch on lines 273-274 that comes before this skip location correction logic. But this `pass` doesn't actually prevent execution from continuing to the skip location correction code.
+
+Wait, let me look at this more carefully. The structure is:
+
+
+
+```python
+if unexpectedsuccess_key in item._store and rep.when == "call":
+    # handle unexpected success
+elif item.config.option.runxfail:
+    pass  # don't interfere
+elif call.excinfo and isinstance(call.excinfo.value, xfail.Exception):
+    # handle xfail
+elif not rep.skipped and xfailed:
+    # handle xfail cases
+elif (item._store.get(skipped_by_mark_key, True) and rep.skipped and type(rep.longrepr) is tuple):
+
+
+
+```
+
+I'm investigating how the `runxfail` option interacts with the skip location correction mechanism. The `pass` statement suggests it should allow further processing, but the implications aren't immediately clear. The interaction between `runxfail` and skip location correction needs careful examination.
+
+The default `True` value for `skipped_by_mark_key` seems particularly intriguing. When a skip mark is present, the key gets explicitly set to `True`, but the default behavior suggests something more complex might be happening in the test setup process. I'll need to trace how this key gets manipulated during different test scenarios.
+
+The key observation is how the store's configuration changes during test setup, potentially affecting skip behavior in unexpected ways. The skip location seems problematic when `--runxfail` is activated. The core issue appears to be in the report generation logic, specifically how the skip location is determined. I need to investigate how the `skipped_by_mark_key` interacts with the report generation process and understand why the location is being incorrectly reported when this flag is used.
+
+The key observation is that the skip location should consistently point to the test item, but the current implementation is failing to do this under certain conditions. This suggests a potential bug in the location tracking mechanism within the `pytest_runtest_makereport` function.
+
+### 👁️ Observation
+<observation>
+
+1. Found the issue in src/_pytest/skipping.py in the pytest_runtest_makereport hook
+
+2. The bug is in line 273-274: when --runxfail is used, the function returns early with `pass`, skipping the skip location correction logic
+
+3. The skip location correction logic is in lines 294-305 but never gets executed when --runxfail is enabled
+
+4. Alternative action could have been to examine test files to understand expected behavior first
+
+5. Next action: Look at the test files to understand the expected behavior better and confirm my analysis
+</observation>
+
+Let me examine the test files to better understand the expected behavior:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing', 'keywords': ['runxfail', 'skip.*location', 'skipping.*runxfail']})
+
+
+## Step 4
+
+### 🤔 Thinking
+Let me look at the test file for skipping to understand the expected behavior better.
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_skipping.py', 'view_range': [233, 352]})
+
+
+## Step 5
+
+### 🤔 Thinking
+Let me also look at the other test files that mention skip location to better understand the expected behavior.
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_runner.py', 'view_range': [157, 178]})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me look for tests that specifically check skip location reporting to understand the expected behavior better.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing', 'keywords': ['longrepr.*skip', 'skip.*reportinfo', 'skipped.*location']})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me search for tests that might test the skip location reporting more broadly.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing', 'keywords': ['reportinfo', 'longrepr', 'mark.*skip']})
+
+
+## Step 8
+
+### 🤔 Thinking
+Let me look at some of these files to understand how skip location reporting is tested and expected to work.
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_skipping.py', 'view_range': [1, 50]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me search more specifically for tests that test the skip location reporting behavior.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing', 'keywords': ['skipped_by_mark', 'skip.*location.*test', 'filename.*line.*reason']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me look more broadly at the test_skipping.py to find tests that might be related to location reporting.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing/test_skipping.py', 'keywords': ['def test.*location', 'longrepr', 'filename', 'line.*reason']})
+
+
+## Step 11
+
+### 🤔 Thinking
+Let me try to find specific tests that might test the skip location reporting by looking for references to lines and filenames.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing', 'keywords': ['test.*py:[0-9]+', 'unconditional skip']})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me look at these specific matches in test_skipping.py that mention "unconditional skip" since that matches the error message from the issue.
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_skipping.py', 'view_range': [608, 650]})
+
+
+## Step 13
+
+### 🤔 Thinking
+Now let me look more for tests that specifically check location reporting. Let me search for test methods that involve reporting locations.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing', 'keywords': ['SKIPPED.*\\[.*\\].*test', 'test_.*py.*:', '-rs']})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me look at the test_terminal.py file since it has references to both SKIPPED and -rs patterns, which are related to the issue.
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_terminal.py', 'view_range': [920, 940]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Perfect! This test shows exactly the expected behavior. The test in line 925-928 defines a test with `@pytest.mark.skip`, and line 931 shows the expected output: "SKIPPED [1] test_summary_s_alias.py:3: unconditional skip".
+
+This confirms that the expected behavior is for skip location to point to the test file and line number (e.g., "test_summary_s_alias.py:3"), not to internal pytest files.
+
+Now I need to explore the repository further to understand the root cause and current behavior.
+
+### 🎯 Action
+ask_repository_agent({'query': "How does pytest's skip location reporting work? What components are involved in determining where a skip is reported as coming from?"})
+
+
+## Step 16
+
+### 🤔 Thinking
+This is very helpful! Now I understand the mechanism better. The key insight is that in `_pytest/skipping.py`, the `pytest_runtest_makereport` hook specifically modifies the `report.longrepr` to change the location from where the skip exception was raised internally to the actual test definition location.
+
+This aligns with what I found in the code - the issue is that when `--runxfail` is enabled, the skip location correction logic is being skipped due to the early `pass` statement.
+
+Let me now understand what the development knowledge suggests and create a comprehensive analysis.
+
+### 👁️ Observation
+## Phase 2: EXPLORATION
+
+Now let me examine the specific root cause based on my analysis and the development knowledge provided:
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/skipping.py', 'view_range': [260, 306]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Now I can clearly see the root cause! The logic flow in `pytest_runtest_makereport` is:
+
+
+1. Line 266: Handle unittest special case
+
+2. Line 273: If `--runxfail` is enabled, just `pass` (do nothing) and skip all subsequent elif branches
+
+3. Line 275: Handle xfail exceptions  
+
+4. Line 279: Handle xfailed tests
+
+5. Line 294: Handle skip location correction for skipped tests
+
+The bug is that when `--runxfail` is enabled (line 273), the function executes `pass` and skips ALL the subsequent `elif` branches, including the critical skip location correction logic at line 294-
+305. This means that when `--runxfail` is used:
+- The skip location correction logic (lines 294-305) never gets executed
+- The `rep.longrepr` remains as set by the internal pytest skip mechanism, pointing to the internal pytest code (like "src/_pytest/skipping.py:238")
+- Instead of being corrected to point to the test location (like "test_it.py:3")
+
+The fix should allow the skip location correction to run even when `--runxfail` is enabled, since `--runxfail` should only affect xfail behavior, not skip behavior.
+
+### 🎯 Action
+think({'thought': "Now let me analyze the root cause analysis steps from the development knowledge to make sure I've covered all aspects:\n\n
+1. ✓ Identified the error symptoms (incorrect location reporting when --runxfail is used)\n
+2. ✓ Traced the execution flow from skip mark to final output \n
+3. ✓ Analyzed the skip handling mechanism in pytest_runtest_makereport hook\n
+4. ✓ Compared actual vs expected location reporting behavior\n
+5. ✓ Investigated how location context is maintained during skip processing (via rep.longrepr correction)\n
+6. ✓ Reviewed the interaction between runxfail and skip systems\n
+7. ✓ Verified the skip information preservation throughout the execution chain\n\nThe involved components match what I found:\n- pytest.skipping module (specifically pytest_runtest_makereport hook)\n- skip handling system (the location correction logic)\n- test location tracking system (item.reportinfo() method)\n\nThe bug is indeed a Context Preservation Bug in the Location Reporting Error category, as the development knowledge suggests. The --runxfail flag is interfering with the skip location correction mechanism even though it should only affect xfail behavior.\n\nThe root cause is clear: the early `pass` statement when --runxfail is enabled prevents the skip location correction logic from running."})
+
+
+## Step 18
+
+### 🤔 Thinking
+Now I have a complete understanding of the issue. Let me formulate the issue analysis.
+
+### 📋 Conclusion
+<observation>
+
+1. Found the root cause in the pytest_runtest_makereport hook in src/_pytest/skipping.py
+
+2. The issue is that when --runxfail is enabled, the function exits early with `pass` and skips the skip location correction logic
+
+3. This causes skip locations to be reported from internal pytest code instead of the test location
+
+4. Alternative action could have been to create a reproduction script first, but exploring the code directly was more efficient
+
+5. Next step: Provide comprehensive issue analysis with all the details for the solution mapper
+</observation>
+
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "When pytest is run with the `--runxfail` flag, the location reporting for tests skipped via `@pytest.mark.skip` or `@pytest.mark.skipif` breaks. Instead of pointing to the test item location (e.g., 'test_it.py:3: unconditional skip'), it incorrectly points to internal pytest code (e.g., 'src/_pytest/skipping.py:238: unconditional skip'). The `--runxfail` flag should only affect xfail behavior and should not interfere with skip location reporting."
+    - status: "yes - the bug exists in the current codebase"
+  </problem_statement>
+  <root_cause>
+    The root cause is in the `pytest_runtest_makereport` hook function in `src/_pytest/skipping.py` at lines 273-
+274. When the `--runxfail` option is enabled, the function executes `pass` and exits early, skipping all subsequent `elif` branches including the critical skip location correction logic at lines 294-
+305. This skip location correction logic is responsible for changing the report location from where the skip exception was raised internally (within pytest) to the actual test item location. Without this correction, skip locations are incorrectly reported from internal pytest code rather than the test location.
+  </root_cause>
+  <current_behavior>
+    - **File**: `src/_pytest/skipping.py`
+    - **Method**: `pytest_runtest_makereport` hook (lines 260-306)
+    - **Current Implementation**: The function uses a series of `if/elif` branches to handle different test outcomes. When `item.config.option.runxfail` is `True`, it executes `pass` (line 274) and skips all subsequent processing, including the skip location correction logic.
+    - **Skip Location Correction Logic**: Lines 294-305 contain logic that corrects `rep.longrepr` from internal pytest locations to test item locations by calling `item.reportinfo()[:2]` and reconstructing the longrepr tuple.
+    - **Current Limitation**: When `--runxfail` is used, this correction never occurs, causing skipped tests to report locations like "src/_pytest/skipping.py:238" instead of the test location.
+  </current_behavior>
+  <expected_behavior>
+    - **File**: `src/_pytest/skipping.py`
+    - **Method**: `pytest_runtest_makereport` hook should be modified
+    - **Expected Implementation**: The skip location correction logic (lines 294-305) should execute regardless of whether `--runxfail` is enabled, since `--runxfail` should only affect xfail behavior, not skip behavior.
+    - **Specific Improvement**: Skip location reporting should consistently point to the test item location (e.g., "test_it.py:3: unconditional skip") whether `--runxfail` is used or not.
+    - **Behavioral Requirements**: 
+      
+1. With `pytest -rs`: should report "test_it.py:3: unconditional skip"
+      
+2. With `pytest -rs --runxfail`: should also report "test_it.py:3: unconditional skip" (same as without --runxfail)
+      
+3. xfail behavior should remain unaffected by the fix
+</expected_behavior>
+</issue_analysis>
+</problem_decoder 0>
+
+<problem_decoder 1>
+## Step 1
+
+### 🤔 Thinking
+The issue describes a problem with pytest's skip location reporting when the `--runxfail` flag is used. Let me start by understanding the problem:
+
+
+1. When using `@pytest.mark.skip` to skip a test, the skip location should point to the test item itself
+
+2. When running with `pytest -rs`, it correctly shows the test file location
+
+3. When running with `pytest -rs --runxfail`, it incorrectly shows the internal pytest skipping.py file location instead
+
+4. The `--runxfail` option should only affect xfail tests, not skip tests
+
+Let me start by exploring the repository structure to understand the codebase better.
+
+### 👁️ Observation
+I'll help you analyze this issue systematically. Let me start by exploring the repository structure to understand the codebase.
+
+### 🎯 Action
+view_directory({'dir_path': './', 'depth': 2})
+
+
+## Step 2
+
+### 🤔 Thinking
+Now I can see the repository structure. This is the pytest repository. The issue mentions the bug is in `src/_pytest/skipping.py`, specifically in the `pytest_runtest_makereport` hook. Let me examine this file first.
+
+### 👁️ Observation
+<observation>
+
+1. Found the pytest repository structure with the main source code in src/_pytest/
+
+2. Located the key file mentioned in the issue: src/_pytest/skipping.py
+
+3. Alternative action could have been to search for terms related to the issue first
+
+4. Next action: Examine the src/_pytest/skipping.py file to understand the current implementation
+</observation>
+
+Let me examine the skipping.py file mentioned in the issue:
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/skipping.py'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Now I can see the code! The issue is in the `pytest_runtest_makereport` hook around line 294-
+305. Let me analyze this:
+
+
+1. The bug appears to be in the conditional logic at line 294-305
+
+2. When `--runxfail` is used, the condition at line 273 `elif item.config.option.runxfail:` passes and does nothing (`pass  # don't interfere`)
+
+3. But then the code continues to the next elif condition at line 294-305 which handles skip location reporting
+
+The problem is with the condition at line 294:
+
+
+```python
+elif (
+    item._store.get(skipped_by_mark_key, True)  # This defaults to True!
+    and rep.skipped
+    and type(rep.longrepr) is tuple
+):
+
+
+```
+
+The issue is that `item._store.get(skipped_by_mark_key, True)` defaults to `True` when the key is not found. But when `--runxfail` is used, the `pytest_runtest_setup` hook might not run properly or the key might not be set correctly.
+
+Let me check how `skipped_by_mark_key` is supposed to be set.
+
+Looking at line 234: `item._store[skipped_by_mark_key] = False` - this is set to False initially in `pytest_runtest_setup`.
+And line 238: `item._store[skipped_by_mark_key] = True` - this is set to True only when a skip is triggered.
+
+The bug seems to be that when `--runxfail` is used, the condition defaults to `True` even when it shouldn't, causing the skip location logic to be applied incorrectly.
+
+Let me explore further to understand the execution flow.
+
+### 👁️ Observation
+<observation>
+
+1. Found the issue in the `pytest_runtest_makereport` hook around lines 294-305
+
+2. The problem is with the default value `True` in `item._store.get(skipped_by_mark_key, True)` when --runxfail is used
+
+3. Alternative action could have been to look at test files to understand expected behavior first
+
+4. Next action: Examine the test files and explore how the skipped_by_mark_key is set up to understand the correct behavior
+</observation>
+
+Let me look at the test files for skipping to better understand the expected behavior:
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_skipping.py', 'view_range': [1, 100]})
+
+
+## Step 4
+
+### 🤔 Thinking
+Let me search for tests specifically related to location reporting and --runxfail to understand the expected behavior better.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing/test_skipping.py', 'keywords': ['runxfail', 'location', 'reportinfo']})
+
+
+## Step 5
+
+### 🤔 Thinking
+Let me search more broadly for location-related tests and runxfail functionality.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing/', 'keywords': ['runxfail']})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me look at the runxfail tests in the skipping test file.
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_skipping.py', 'view_range': [233, 352]})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me search for tests related to skip location reporting to understand the expected behavior better.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing/', 'keywords': ['skipped.*line', 'SKIPPED.*\\[1\\]', 'reportinfo']})
+
+
+## Step 8
+
+### 🤔 Thinking
+Let me check the test_runner.py file to see if there are tests related to skip location reporting.
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_runner.py', 'view_range': [150, 185]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me search for tests specifically about skip location and see if there are any that use --runxfail.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing/', 'keywords': ['location.*skip', 'longrepr.*skip', 'filename.*line']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me also check the ask_repository_agent to understand more about the issue and the expected behavior.
+
+### 🎯 Action
+ask_repository_agent({'query': "How does pytest's skip location reporting work? What is the purpose of the code in pytest_runtest_makereport that modifies rep.longrepr for skipped tests?"})
+
+
+## Step 11
+
+### 🤔 Thinking
+Now I have a better understanding of the skip location reporting mechanism. Let me look at the specific issue more carefully.
+
+Looking back at the problematic code in `src/_pytest/skipping.py` lines 294-305:
+
+
+
+```python
+elif (
+    item._store.get(skipped_by_mark_key, True)  # This defaults to True!
+    and rep.skipped
+    and type(rep.longrepr) is tuple
+):
+    # skipped by mark.skipif; change the location of the failure
+    # to point to the item definition, otherwise it will display
+    # the location of where the skip exception was raised within pytest
+    _, _, reason = rep.longrepr
+    filename, line = item.reportinfo()[:2]
+    assert line is not None
+    rep.longrepr = str(filename), line + 1, reason
+
+
+```
+
+The issue is that when `--runxfail` is used:
+
+
+1. The `item.config.option.runxfail` condition at line 273 causes the function to "pass" (do nothing) but continue to the next elif
+
+2. The condition `item._store.get(skipped_by_mark_key, True)` defaults to `True` because the key might not be set properly when `--runxfail` is used
+
+3. This causes skip tests to be incorrectly treated as if they were skipped by mark, triggering the location correction logic when it shouldn't
+
+Let me confirm this understanding by looking at the initialization in `pytest_runtest_setup` and see what happens when `--runxfail` is used.
+
+### 👁️ Observation
+<observation>
+
+1. Found the repository agent's explanation of skip location reporting mechanism
+
+2. Identified that the problem is in the condition `item._store.get(skipped_by_mark_key, True)` defaulting to True inappropriately
+
+3. Alternative action could have been to create a test to reproduce the issue first
+
+4. Next action: Examine how the skipped_by_mark_key is initialized and understand the correct logic flow
+</observation>
+
+Now let me understand the precise issue. Let me create a simple reproduction to validate my understanding:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'src/_pytest/skipping.py', 'keywords': ['skipped_by_mark_key.*=', 'pytest_runtest_setup']})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me look specifically at how the skipped_by_mark_key is managed through the hooks.
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/skipping.py', 'view_range': [225, 245]})
+
+
+## Step 13
+
+### 🤔 Thinking
+Now I understand the issue clearly! Let me trace through the logic:
+
+
+1. In `pytest_runtest_setup` (line 232-245):
+   - Line 234: `item._store[skipped_by_mark_key] = False` (initialize to False)
+   - Lines 236-239: If there are skip marks, set `skipped_by_mark_key` to True and call `skip()`
+
+
+2. In `pytest_runtest_makereport` (line 260-306):
+   - Line 273: `elif item.config.option.runxfail:` - if --runxfail is used, do nothing (pass)
+   - Lines 294-305: The problematic condition
+
+The issue is in the condition at line 295: `item._store.get(skipped_by_mark_key, True)` 
+
+The problem is the default value `True`. It should be `False` to match the initialization in `pytest_runtest_setup`. 
+
+Here's what happens:
+
+**Without --runxfail:**
+- `pytest_runtest_setup` sets `skipped_by_mark_key = True` for skipped tests
+- `pytest_runtest_makereport` checks `item._store.get(skipped_by_mark_key, True)` which returns `True`
+- Location correction happens correctly
+
+**With --runxfail:**
+- Some tests that shouldn't be affected by skip location correction still hit the elif at line 294
+- The `item._store.get(skipped_by_mark_key, True)` defaults to `True` even when it should be `False`
+- This causes incorrect location reporting for skip tests that weren't actually skipped by mark
+
+The fix should be to change the default from `True` to `False` in line 
+295. But wait, let me think about this more carefully. Why would it default to `True`? Let me check if there are cases where the setup hook doesn't run.
+
+I'm noticing a subtle nuance in the test skipping mechanism. The default `True` might be intentional, suggesting there could be edge cases where the setup hook doesn't execute as expected. 
+
+The key observation is how the `skipped_by_mark_key` interacts with different pytest configurations, particularly when `--runxfail` is involved. There might be scenarios where the default `True` serves a specific purpose in handling test skipping logic.
+
+The location correction seems overly broad, potentially mishandling different types of skip markers in ways not originally intended by the design.
+
+### 🎯 Action
+think({'thought': 'Let me analyze the root cause more carefully:\n\n
+1. The skipped_by_mark_key is designed to track whether a test was skipped due to skip/skipif marks\n
+2. In pytest_runtest_setup, it\'s initialized to False, then set to True if skip marks are found\n
+3. In pytest_runtest_makereport, the location correction logic uses this key with a default of True\n\nThe issue occurs with --runxfail:\n- For @pytest.mark.skip tests: skipped_by_mark_key is set to True in setup, skip() is called\n- When makereport runs with --runxfail:\n  - The runxfail condition passes (does nothing)\n  - The location correction logic runs because skipped_by_mark_key is True\n  - This changes the location from the test definition to internal pytest code\n\nThe real issue is that the default value of True in item._store.get(skipped_by_mark_key, True) is wrong. It should be False to match the initialization.\n\nLooking at the comment "skipped by mark.skipif; change the location of the failure", this logic is specifically for skipif marks, not general skip marks. But the condition checks for any skip marks (skipped_by_mark_key).\n\nActually, I think I need to understand what the original location should be vs what it becomes.'})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me look at the issue from a different angle. Let me check what exactly `item.reportinfo()[:2]` returns vs what should be reported.
+
+### 🎯 Action
+ask_repository_agent({'query': 'What does item.reportinfo() return and how is it different from the test location? When should the skip location correction logic be applied vs when should it not be applied?'})
+
+
+## Step 15
+
+### 🤔 Thinking
+Now I'm getting a clearer picture, but there seems to be some confusion. The repository agent mentioned `item._evalskip`, but in the current code I see `skipped_by_mark_key`. Let me check if there are any version differences or if the code has changed.
+
+The agent mentioned that the correction logic should only apply for `pytest.mark.skipif`, not for direct `pytest.skip()` calls or `pytest.mark.skip`. 
+
+But in the issue description, the problem is with `@pytest.mark.skip` (not `skipif`), and it's showing the wrong location when `--runxfail` is used.
+
+Let me look at the exact problem:
+- Without --runxfail: `SKIPPED [1] test_it.py:3: unconditional skip` (correct)
+- With --runxfail: `SKIPPED [1] src/_pytest/skipping.py:238: unconditional skip` (wrong)
+
+So the location is changing from the test file to the internal pytest file. This suggests that without --runxfail, no location correction happens (so it shows the test file), but with --runxfail, location correction happens incorrectly.
+
+Let me check line 238 in skipping.py to see what's there.
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/skipping.py', 'view_range': [235, 245]})
+
+
+## Step 16
+
+### 🤔 Thinking
+Now I see! Line 238 is where `skipped_by_mark_key` is set to True, and line 239 is where `skip(skipped.reason)` is called. The error message shows "src/_pytest/skipping.py:238" which corresponds to line 238 where the skip logic is executed.
+
+So the flow is:
+
+1. Without --runxfail: The skip happens at line 239, but the location correction logic doesn't run, so it correctly reports the test location
+
+2. With --runxfail: The skip happens at line 239, but then the location correction logic runs incorrectly and changes the location to the internal pytest code
+
+The problem is that the location correction logic should only run for specific cases (probably skipif with conditions), but it's running for all skip marks when --runxfail is used.
+
+Let me understand why the --runxfail flag is causing this difference. Looking at the logic again:
+
+Line 273-274: 
+
+
+```python
+elif item.config.option.runxfail:
+    pass  # don't interfere
+
+
+```
+
+This means that when --runxfail is used, none of the other elif conditions should execute. But the problem is that the location correction logic is in a separate elif at line 294, which does execute.
+
+The issue is the logic flow:
+- Line 273: `elif item.config.option.runxfail: pass` - this should prevent other elif conditions
+- But line 294 is another elif that still executes
+
+Wait, that's not right. In Python, elif conditions are mutually exclusive. If line 273 matches, line 294 should not execute.
+
+Let me look at the exact structure again.
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/skipping.py', 'view_range': [260, 306]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Now I see the exact issue! Let me trace through the logic:
+
+Without --runxfail for a @pytest.mark.skip test:
+
+1. Line 266: First if condition (unexpectedsuccess_key) - doesn't match
+
+2. Line 273: `elif item.config.option.runxfail` - False, so doesn't match
+
+3. Line 275: `elif call.excinfo and isinstance(call.excinfo.value, xfail.Exception)` - doesn't match for regular skip
+
+4. Line 279: `elif not rep.skipped and xfailed` - doesn't match because `rep.skipped` is True
+
+5. Line 294: The location correction elif - this depends on skipped_by_mark_key
+
+With --runxfail for a @pytest.mark.skip test:
+
+1. Line 266: First if condition - doesn't match
+
+2. Line 273: `elif item.config.option.runxfail` - True, so executes `pass` and STOPS HERE
+
+3. Lines 275, 279, 294 - NONE of these execute because elif is mutually exclusive
+
+So the issue must be elsewhere! The --runxfail condition should prevent the location correction from running at all.
+
+Wait, let me check if there's some other path or hook that might be causing this.
+
+Actually, let me step back and consider the issue description again. The user says:
+
+Without --runxfail: `SKIPPED [1] test_it.py:3: unconditional skip` (correct)
+With --runxfail: `SKIPPED [1] src/_pytest/skipping.py:238: unconditional skip` (wrong)
+
+Line 238 is inside the `pytest_runtest_setup` hook, not the `pytest_runtest_makereport` hook. So the issue might not be in the location correction logic in makereport, but rather in how the skip exception is being generated or handled.
+
+I'm digging deeper into the skip mechanism's core behavior. The problem centers on how the location gets captured when a test is skipped, especially with the --runxfail flag. 
+
+The skip exception's origin point seems to be the critical factor. When the flag is active, something is preventing the standard location correction from working correctly. I need to investigate how the exception traceback is being processed and why the test file's original location isn't being preserved.
+
+The key question is: What specifically changes in the exception handling when --runxfail is introduced that disrupts the normal location correction mechanism?
+
+### 🎯 Action
+think({'thought': "I now understand the root cause clearly:\n\n
+1. The --runxfail flag is supposed to only affect xfail tests, not skip tests\n
+2. However, the current logic at line 273 `elif item.config.option.runxfail: pass` prevents ALL subsequent elif conditions from executing\n
+3. This includes the location correction logic at line 294-305, which is needed for proper skip location reporting\n
+4. Without --runxfail, the location correction runs and fixes the location from internal pytest code to the test definition\n
+5. With --runxfail, the location correction doesn't run, so the internal pytest location is reported instead\n\nThe fix needs to ensure that the location correction logic for skip marks runs regardless of the --runxfail flag, since --runxfail should only affect xfail behavior, not skip behavior.\n\nThe problem is in the structure of the elif conditions - the runxfail condition is too broad and blocks unrelated logic."})
+
+
+## Step 18
+
+### 🤔 Thinking
+Now I need to provide a comprehensive analysis. Let me also look at what specific tests might exist to verify this behavior.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing/test_skipping.py', 'keywords': ['test.*skip.*location', 'longrepr', 'reportinfo']})
+
+
+## Step 19
+
+### 🤔 Thinking
+Let me search for any tests that might be related to this behavior and check if there are existing tests that should be catching this bug.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing/', 'keywords': ['runxfail.*skip', 'skip.*runxfail']})
+
+
+## Step 20
+
+### 🤔 Thinking
+It seems there are no existing tests that cover the interaction between --runxfail and skip location reporting, which is why this bug went unnoticed.
+
+Now let me provide my comprehensive analysis.
+
+### 👁️ Observation
+## READING: Problem Statement
+
+The issue describes a bug in pytest's skip location reporting when the `--runxfail` flag is used. 
+
+**Problem Details:**
+- When `@pytest.mark.skip` or `@pytest.mark.skipif` marks are used to skip tests, the reported skip location should point to the test item definition
+- Without `--runxfail`: `SKIPPED [1] test_it.py:3: unconditional skip` (correct behavior)
+- With `--runxfail`: `SKIPPED [1] src/_pytest/skipping.py:238: unconditional skip` (incorrect behavior)
+- The `--runxfail` flag is intended only to affect xfail tests, not skip tests
+- The bug is located in the `pytest_runtest_makereport` hook in `src/_pytest/skipping.py`
+
+**Technical Details:**
+- The error shows `src/_pytest/skipping.py:238` which corresponds to line 238 in the skipping.py file
+- The error message is "unconditional skip" indicating a `@pytest.mark.skip` decorator
+- The issue affects both `skip` and `skipif` marks when `--runxfail` is used
+
+## EXPLORATION: Finding Root Cause
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/skipping.py', 'view_range': [273, 305]})
+
+
+## Step 21
+
+### 🤔 Thinking
+Perfect, now I can provide the complete analysis with all the details I've gathered.
+
+### 📋 Conclusion
+<observation>
+
+1. Confirmed the root cause: line 273-274 prevents the location correction logic at lines 294-305 from executing
+
+2. The location correction logic is necessary for proper skip location reporting regardless of --runxfail
+
+3. Alternative action could have been to analyze the hook execution order in more detail
+
+4. Next action: Provide comprehensive issue analysis with all findings
+</observation>
+
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "The --runxfail flag incorrectly affects pytest.mark.skip location reporting by preventing the location correction logic from running, causing skip locations to point to internal pytest code instead of the test definition"
+    - status: "yes"
+  </problem_statement>
+  <root_cause>
+    The root cause is in the `pytest_runtest_makereport` hook in `src/_pytest/skipping.py` at lines 273-
+274. The conditional logic `elif item.config.option.runxfail: pass` prevents all subsequent elif conditions from executing, including the essential location correction logic at lines 294-
+305. This location correction logic is responsible for changing skip locations from internal pytest code locations (where skip exceptions are raised) to the actual test definition locations. When --runxfail is used, this correction doesn't happen, causing skip tests to report incorrect locations like `src/_pytest/skipping.py:238` instead of the test file location.
+  </root_cause>
+  <current_behavior>
+    Currently, the `pytest_runtest_makereport` hook in `src/_pytest/skipping.py` contains a chain of elif conditions (lines 266-305) that handle different test outcomes. When `--runxfail` is used, line 273 matches and executes `pass`, which prevents the location correction logic at lines 294-305 from running. This logic is crucial for skip marks because:
+
+    
+1. In `pytest_runtest_setup` (lines 236-239), when skip marks are detected, `skip(skipped.reason)` is called
+    
+2. This raises a skip exception at line 239, creating a traceback pointing to internal pytest code
+    
+3. The location correction logic in `pytest_runtest_makereport` (lines 294-305) is designed to fix this by changing `rep.longrepr` from the internal location to `item.reportinfo()[:2]` (the test definition location)
+    
+4. Without --runxfail, this correction runs and produces correct locations
+    
+5. With --runxfail, this correction is blocked, leaving the internal location in the report
+
+    The affected files include `src/_pytest/skipping.py` with methods `pytest_runtest_setup` and `pytest_runtest_makereport`, and the `skipped_by_mark_key` store mechanism for tracking skip mark state.
+  </current_behavior>
+  <expected_behavior>
+    After implementing the fix, the location correction logic for skip marks should run regardless of the --runxfail flag, since --runxfail should only affect xfail test behavior, not skip test behavior. The expected behavior is:
+
+    
+1. With or without --runxfail, `@pytest.mark.skip` and `@pytest.mark.skipif` tests should report their location as the test definition location (e.g., `test_it.py:3`)
+    
+2. The --runxfail flag should continue to work correctly for xfail tests by disabling xfail behavior
+    
+3. Skip location reporting should be consistent across different command-line options
+
+    The fix will involve modifying the conditional logic in `pytest_runtest_makereport` to ensure that the location correction for skip marks (lines 294-305) can execute even when --runxfail is used. This may require restructuring the elif chain or adding specific conditions to allow skip-related logic to run independently of xfail-related logic.
+
+    Files to be modified: `src/_pytest/skipping.py` in the `pytest_runtest_makereport` method, specifically the conditional structure around lines 273-
+305. </expected_behavior>
+</issue_analysis>
+</problem_decoder 1>
+
+<problem_decoder 2>
+## Step 1
+
+### 🤔 Thinking
+I need to analyze this issue carefully. Let me start by understanding what the problem is:
+
+
+1. When using `@pytest.mark.skip` to skip a test
+
+2. Running with `pytest -rs` gives the correct location reporting: `SKIPPED [1] test_it.py:3: unconditional skip`
+
+3. But running with `pytest -rs --runxfail` breaks the location reporting and instead shows: `SKIPPED [1] src/_pytest/skipping.py:238: unconditional skip`
+
+4. The issue is that `--runxfail` should only affect xfail tests, not skip tests
+
+The hint suggests the bug is in `src/_pytest/skipping.py`, in the `pytest_runtest_makereport` hook.
+
+Let me start by exploring the repository structure to understand the codebase better.
+
+### 👁️ Observation
+I'll help you analyze this issue. Let me start by exploring the repository structure to understand the codebase and then dive into the specific problem.
+
+## Phase 1: READING
+
+### 🎯 Action
+view_directory({'dir_path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Now I can see this is the pytest repository. The issue mentions that the bug is in `src/_pytest/skipping.py` in the `pytest_runtest_makereport` hook. Let me examine this file first to understand the current implementation.
+
+### 👁️ Observation
+<observation>
+
+1. This is the pytest repository with src/_pytest/ containing the main pytest implementation
+
+2. Alternative action could have been searching for specific keywords first
+
+3. Next action: Examine the skipping.py file mentioned in the issue hint
+</observation>
+
+Let me examine the skipping.py file mentioned in the issue hint:
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/skipping.py'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Now I can see the issue! Looking at the `pytest_runtest_makereport` hook (lines 260-306), I can see that there's a condition at lines 294-305 that handles skipped tests:
+
+
+
+```python
+elif (
+    item._store.get(skipped_by_mark_key, True)
+    and rep.skipped
+    and type(rep.longrepr) is tuple
+):
+    # skipped by mark.skipif; change the location of the failure
+    # to point to the item definition, otherwise it will display
+    # the location of where the skip exception was raised within pytest
+    _, _, reason = rep.longrepr
+    filename, line = item.reportinfo()[:2]
+    assert line is not None
+    rep.longrepr = str(filename), line + 1, reason
+
+
+```
+
+However, this block is preceded by an `elif item.config.option.runxfail:` condition at line 273 that simply passes without doing anything:
+
+
+
+```python
+elif item.config.option.runxfail:
+    pass  # don't interfere
+
+
+```
+
+The problem is that when `--runxfail` is set, this condition is True, so it takes precedence and the code never reaches the block that fixes the location reporting for skipped tests.
+
+The logic is wrong because the `--runxfail` option should only affect xfail tests, but currently it's preventing the skip location fix from being applied.
+
+Let me look at the test files to understand the expected behavior better.
+
+### 👁️ Observation
+<observation>
+
+1. Found the issue in pytest_runtest_makereport hook in lines 273-274 and 294-305
+
+2. Alternative action could have been examining test files first to understand expected behavior
+
+3. Next action: Look at test files to understand the intended behavior and confirm the problem
+</observation>
+
+Let me examine the test file for skipping to understand the expected behavior:
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_skipping.py', 'view_range': [1, 100]})
+
+
+## Step 4
+
+### 🤔 Thinking
+Let me search for tests related to --runxfail and skip location reporting to better understand the issue.
+
+### 👁️ Observation
+Let me search for tests related to runxfail and location reporting:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing', 'keywords': ['runxfail', 'location.*report', 'skip.*location']})
+
+
+## Step 5
+
+### 🤔 Thinking
+Let me examine the runxfail test section to understand how it should interact with skip functionality.
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_skipping.py', 'view_range': [233, 352]})
+
+
+## Step 6
+
+### 🤔 Thinking
+Now let me look at the skip location test cases to understand exactly what the expected behavior should be.
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_runner.py', 'view_range': [157, 178]})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me search for more specific tests about skip location and runxfail interaction:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing', 'keywords': ['pytest.mark.skip.*location', 'runxfail.*skip', 'skip.*runxfail']})
+
+
+## Step 8
+
+### 🤔 Thinking
+Let me also look at testing acceptance_test.py since it mentioned skip.*location:
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/acceptance_test.py', 'view_range': [760, 770]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me create a small test to reproduce the issue and understand exactly what's happening. Let me search for tests that involve skip mark location reporting more broadly:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing', 'keywords': ['longrepr', 'skipif.*reportinfo', 'reportinfo']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me look at test_skipping.py line 219 to see if it provides clues about longrepr and skip location:
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_skipping.py', 'view_range': [215, 230]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Now let me search for more specific test cases that might show the expected behavior for skip location. Let me look at reports.py to understand better how longrepr works:
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/reports.py', 'view_range': [1, 100]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Now let me search for more specific tests about how the location reporting for skip marks works:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'testing', 'keywords': ['mark.skipif.*longrepr', 'unconditional skip']})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me check the test_skipping.py section for "unconditional skip":
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_skipping.py', 'view_range': [608, 650]})
+
+
+## Step 14
+
+### 🤔 Thinking
+Now let me try to understand better what happens with skipped tests by creating a simple reproduction test. First, let me check the terminal.py test for "unconditional skip" to understand the reporting format:
+
+### 🎯 Action
+view_file_content({'file_name': 'testing/test_terminal.py', 'view_range': [925, 940]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Perfect! Now I see the expected format. The test shows that when a test is marked with `@pytest.mark.skip`, the output should be:
+
+
+```
+SKIPPED [1] test_summary_s_alias.py:3: unconditional skip
+
+
+```
+
+This matches exactly what was described in the issue. The location should be `test_summary_s_alias.py:3` (the test file and line where the test is defined), not somewhere in `src/_pytest/skipping.py`.
+
+Now let me look at the issue more carefully. Let me examine the code that handles this in more detail:
+
+### 👁️ Observation
+Now let me look at the specific problematic part of the code more closely. The issue is in the `pytest_runtest_makereport` hook:
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/skipping.py', 'view_range': [260, 310]})
+
+
+## Step 16
+
+### 🤔 Thinking
+Let me also look at how runner.py handles skip exceptions to understand how the default longrepr is created:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'src/_pytest', 'keywords': ['skip.*Exception', 'skip.*longrepr']})
+
+
+## Step 17
+
+### 🤔 Thinking
+Let me also examine the runner.py file to see how the CallInfo is created and how exceptions are handled:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'src/_pytest', 'keywords': ['CallInfo', 'skip.*traceback']})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me look at runner.py to understand how the reports are generated:
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/runner.py', 'view_range': [217, 320]})
+
+
+## Step 19
+
+### 🤔 Thinking
+Now I need to look at the TestReport.from_item_and_call method to understand how the longrepr is initially set:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'src/_pytest', 'keywords': ['TestReport.*from_item_and_call', 'from_item_and_call']})
+
+
+## Step 20
+
+### 🤔 Thinking
+Let me check the TestReport.from_item_and_call method:
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/reports.py', 'view_range': [285, 350]})
+
+
+## Step 21
+
+### 🤔 Thinking
+Perfect! Now I understand the complete flow. Let me trace through what happens:
+
+
+1. When a test is skipped (due to `@pytest.mark.skip`), a `skip.Exception` is raised
+
+2. In `TestReport.from_item_and_call` (lines 311-314), when `excinfo.errisinstance(skip.Exception)` is True:
+   - The outcome is set to "skipped"
+   - The longrepr is set to a tuple: `(str(r.path), r.lineno, r.message)` where `r` is `excinfo._getreprcrash()`
+   - This longrepr tuple contains the path and line number of where the skip exception was raised, which is inside pytest's skipping.py
+
+
+3. Then, in `pytest_runtest_makereport` hook in skipping.py (lines 294-305), there's special handling to fix this:
+   
+
+```python
+   elif (
+       item._store.get(skipped_by_mark_key, True)
+       and rep.skipped
+       and type(rep.longrepr) is tuple
+   ):
+       # skipped by mark.skipif; change the location of the failure
+       # to point to the item definition, otherwise it will display
+       # the location of where the skip exception was raised within pytest
+       _, _, reason = rep.longrepr
+       filename, line = item.reportinfo()[:2]
+       assert line is not None
+       rep.longrepr = str(filename), line + 1, reason
+   
+
+```
+
+
+4. However, this special handling is prevented when `--runxfail` is used because of the earlier condition at line 273-274:
+   
+
+```python
+   elif item.config.option.runxfail:
+       pass  # don't interfere
+   
+
+```
+
+The problem is that the `--runxfail` condition comes before the skip location fix, so the skip location fix never gets applied when `--runxfail` is used.
+
+I see a straightforward solution to ensure accurate skip location reporting. We need to modify the code to apply the skip location fix independently of the `--runxfail` option. This would involve separating the xfail and skip handling logic to maintain the intended behavior for both scenarios.
+
+### 👁️ Observation
+Now I have enough information to provide a comprehensive analysis. Let me also check how the `skipped_by_mark_key` is set:
+
+### 🎯 Action
+view_file_content({'file_name': 'src/_pytest/skipping.py', 'view_range': [232, 245]})
+
+
+## Step 22
+
+### 🤔 Thinking
+Perfect! Now I have a complete understanding. Let me also confirm by asking the repository agent about this specific hook behavior:
+
+### 🎯 Action
+ask_repository_agent({'query': 'How does the pytest_runtest_makereport hook work for handling skip location reporting? What is the purpose of the skipped_by_mark_key and how does --runxfail interact with it?'})
+
+
+## Step 23
+
+### 🤔 Thinking
+The repository agent's response mentions "evalskip" and seems to be referring to an older version of the code. The current code uses "skipped_by_mark_key" instead. This confirms that I'm looking at the right place in the current code.
+
+Now I have a complete understanding of the issue. Let me provide the final issue analysis.
+
+### 👁️ Observation
+<observation>
+
+1. Completely understood the issue flow through TestReport.from_item_and_call and pytest_runtest_makereport
+
+2. Alternative action could have been writing a reproduction script first
+
+3. Next action: Provide comprehensive issue analysis based on my understanding
+</observation>
+
+## Phase 2: EXPLORATION
+
+Based on my analysis of the codebase, I can now provide a comprehensive understanding of the issue:
+
+### 🎯 Action
+think({'thought': "Let me summarize the root cause:\n\n
+1. When `@pytest.mark.skip` is used, a skip.Exception is raised in pytest_runtest_setup\n
+2. The TestReport.from_item_and_call method creates a longrepr tuple with (path, line, reason) where path/line point to where the exception was raised (inside pytest's skipping.py)\n
+3. The pytest_runtest_makereport hook in skipping.py has special logic to fix this location to point to the test definition instead\n
+4. However, this fix is prevented when --runxfail is used because of an elif condition that takes precedence\n
+5. The --runxfail option should only affect xfail tests, not skip tests, but currently it prevents the skip location fix from being applied\n\nThe fix is straightforward: reorder the conditions in pytest_runtest_makereport so that the skip location fix is applied before checking for --runxfail, or make the --runxfail condition more specific to only affect xfail-related behavior."})
+
+
+## Step 24
+
+### 🤔 Thinking
+Now I have enough information to provide the final issue analysis. The problem is clear:
+
+
+1. **Problem Statement**: When using `--runxfail`, pytest incorrectly reports the skip location for `@pytest.mark.skip` tests as pointing to the pytest internal code instead of the test definition.
+
+
+2. **Root Cause**: In the `pytest_runtest_makereport` hook, there's an `elif item.config.option.runxfail: pass` condition that comes before the skip location fix logic, preventing the fix from being applied when `--runxfail` is used.
+
+
+3. **Current Behavior**: Skip location shows `src/_pytest/skipping.py:238` instead of the actual test file/line.
+
+
+4. **Expected Behavior**: Skip location should show the test file and line regardless of whether `--runxfail` is used, since `--runxfail` should only affect xfail tests, not skip tests.
+
+Let me provide a comprehensive final analysis.
+
+### 📋 Conclusion
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "When using the `--runxfail` command line option with pytest, the location reporting for tests skipped via `@pytest.mark.skip` or `@pytest.mark.skipif` shows the internal pytest code location (`src/_pytest/skipping.py:238`) instead of the actual test location (`test_file.py:line_number`). The `--runxfail` option is intended to only affect xfail test behavior and should not interfere with skip test location reporting."
+    - status: "yes"
+  </problem_statement>
+  <root_cause>
+    The root cause is in the `pytest_runtest_makereport` hook in `src/_pytest/skipping.py` at lines 273-
+274. There is an incorrect precedence of conditions that prevents the skip location fix from being applied when `--runxfail` is used. The problematic flow is:
+
+    
+1. When a test is marked with `@pytest.mark.skip`, a `skip.Exception` is raised in `pytest_runtest_setup()` 
+    
+2. `TestReport.from_item_and_call()` (lines 311-314 in `src/_pytest/reports.py`) creates the initial report with a `longrepr` tuple pointing to where the skip exception was raised (inside pytest's internal code)
+    
+3. The `pytest_runtest_makereport` hook should fix this location to point to the test definition via the code block at lines 294-305
+    
+4. However, when `--runxfail` is used, the condition at lines 273-274 (`elif item.config.option.runxfail: pass`) executes first and bypasses the skip location fix logic
+    
+5. This results in the longrepr maintaining the internal pytest location instead of being corrected to the test location
+
+    The `--runxfail` condition should not prevent the skip location fix from being applied since it's only meant to affect xfail test behavior.
+  </root_cause>
+  <current_behavior>
+    - File: `src/_pytest/skipping.py`
+    - Method: `pytest_runtest_makereport()` hook (lines 260-306)
+    - Current implementation overview: The hook uses a series of `elif` conditions to handle different test outcomes. The `elif item.config.option.runxfail: pass` condition at lines 273-274 takes precedence over the skip location fix logic at lines 294-
+305. - Existing limitation: When `--runxfail` is used, skipped tests marked with `@pytest.mark.skip` or `@pytest.mark.skipif` show incorrect location reporting pointing to `src/_pytest/skipping.py:238` instead of the test file location.
+    - The `skipped_by_mark_key` store key is properly set to `True` in `pytest_runtest_setup()` when skip marks are evaluated, but the location fix logic never executes when `--runxfail` is enabled.
+  </current_behavior>
+  <expected_behavior>
+    - Affected files: `src/_pytest/skipping.py`
+    - Modified method: `pytest_runtest_makereport()` hook needs condition reordering
+    - Specific behavioral improvements: 
+      
+1. Skip location reporting should work correctly regardless of whether `--runxfail` is used
+      
+2. Tests marked with `@pytest.mark.skip` should report their location as `test_file.py:line_number` consistently
+      
+3. The `--runxfail` option should continue to only affect xfail test behavior without interfering with skip test processing
+      
+4. The skip location fix logic (lines 294-305) should execute for skip tests even when `--runxfail` is enabled
+    - The fix involves ensuring that the condition that handles skip location correction is evaluated before or independent of the `--runxfail` condition, or making the `--runxfail` condition more specific to only handle xfail-related scenarios.
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 2>
+
+<solution_mapper 0>
+## Step 1
+
+### 🤔 Thinking
+I'm the **Solution Mapper** assistant, so my role is to:
+
+
+1. **EXPLORATION**: Find the files related to the problem and possible solutions
+
+2. **REPRODUCTION**: Create a script to reproduce the issue 
+
+3. **FIX ANALYSIS**: Develop a solution to fix the issue
+
+Let me start with exploration. From the issue analysis, I can see:
+
+- The bug is in `src/_pytest/skipping.py`, specifically in the `pytest_runtest_makereport` hook
+- The problem is that `--runxfail` breaks pytest.mark.skip location reporting
+- When `--runxfail` is used, skip location points to internal pytest code instead of the test location
+- The root cause is in the conditional logic at lines 273-274 that prevents skip location correction
+
+Let me start exploring the repository to understand the structure and find the relevant files.
+
+### 👁️ Observation
+I'll help you map a solution to this problem. Let me start by exploring the repository structure and understanding the issue better.
+
+## 
+1. EXPLORATION
+
+Let me first explore the repository structure and find the relevant files.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Good, I can see the repository structure. I can see:
+- `src/_pytest/` - this is where the main pytest code is
+- `testing/` - this contains the test files
+- There's a `testing/test_skipping.py` which might be relevant for understanding how skipping tests work
+
+Let me look at the main file mentioned in the issue - `src/_pytest/skipping.py`.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './src/_pytest'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I can see `./src/_pytest/skipping.py` which is the file mentioned in the issue. Let me examine this file to understand the current implementation and locate the problematic code.
+
+### 👁️ Observation
+Now let me examine the main file where the issue is located:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './src/_pytest/skipping.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Perfect! Now I can see the exact issue. Let me analyze the code:
+
+Looking at the `pytest_runtest_makereport` hook starting at line 260, I can see the conditional structure:
+
+
+1. Line 266-272: Handle unittest special case
+
+2. Line 273-274: `elif item.config.option.runxfail: pass` - This is the problematic line!
+
+3. Line 275-278: Handle xfail exceptions 
+
+4. Line 279-293: Handle xfailed tests that pass/fail
+
+5. Line 294-305: Handle skipped tests to correct the location
+
+The issue is exactly as described in the analysis: when `--runxfail` is used, line 273-274 matches and executes `pass`, which prevents the subsequent `elif` conditions from being evaluated. This means the skip location correction logic at lines 294-305 never gets executed.
+
+The logic at lines 294-305 is responsible for correcting the skip location from the internal pytest location to the actual test file location, but it's unreachable when `--runxfail` is used.
+
+Let me also look at the related files to understand the full context.
+
+### 👁️ Observation
+Now let me examine the reports.py file to understand how the initial report is created:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './src/_pytest/reports.py', 'view_range': [310, 320]})
+
+
+## Step 5
+
+### 🤔 Thinking
+Perfect! I can see that in `reports.py`, lines 311-314 show how the initial skip report is created:
+
+
+
+```python
+elif excinfo.errisinstance(skip.Exception):
+    outcome = "skipped"
+    r = excinfo._getreprcrash()
+    longrepr = (str(r.path), r.lineno, r.message)
+
+
+```
+
+This confirms what the issue analysis stated - the initial `longrepr` is set to the location where the skip exception was raised (which is in the internal pytest code), and then the correction logic in `skipping.py` lines 294-305 is supposed to fix this.
+
+Now let me look at some tests to understand the expected behavior better.
+
+### 👁️ Observation
+Let me look at the testing files to understand how this should work:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './testing/test_skipping.py', 'view_range': [1, 50]})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me search for tests that specifically deal with skip location reporting.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './testing', 'keywords': ['skip.*location', 'runxfail', 'longrepr']})
+
+
+## Step 7
+
+### 🤔 Thinking
+Great! Let me look at the terminal and runner test files that might have the expected output format, and the skipping tests that involve runxfail.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './testing/test_skipping.py', 'view_range': [230, 260]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Let me look at the terminal tests to see the expected output format.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './testing/test_terminal.py', 'view_range': [2070, 2130]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me search for tests that specifically show the expected behavior with skip location reporting.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './testing', 'keywords': ['unconditional skip', 'SKIPPED.*test_.*\\.py']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me check these specific locations to see the expected skip behavior.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './testing/test_terminal.py', 'view_range': [925, 940]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Perfect! This shows the expected behavior: `SKIPPED [1] test_summary_s_alias.py:3: unconditional skip` - the location should point to line 3 of the test file (where the function definition with the `@pytest.mark.skip` decorator is).
+
+Let me also look at some tests in test_skipping.py that show the skip location behavior.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './testing/test_skipping.py', 'view_range': [780, 800]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Now let me look at the ask_repository_agent to get more specific information about the skipping mechanism and the runxfail flag.
+
+### 🎯 Action
+ask_repository_agent({'query': 'How does the --runxfail flag work and what is its intended purpose? What should it affect and what should it not affect?'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Perfect! This confirms what I suspected. The `--runxfail` flag should ONLY affect xfail tests, not skip tests. Skip tests should continue to behave exactly the same whether `--runxfail` is used or not.
+
+Now I have enough information to create a reproduction script and plan the fix.
+
+## 
+2. REPRODUCTION
+
+Let me create a reproduction script to confirm the issue.
+
+### 👁️ Observation
+## 
+2. REPRODUCTION
+
+Let me create a reproduction script to verify the issue:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './reproduction.py', 'file_text': '#!/usr/bin/env python\n"""\nReproduction script for skip location reporting bug with --runxfail flag.\n\nThis script demonstrates that when --runxfail is used, skip location reporting\npoints to internal pytest code instead of the test definition.\n"""\nimport subprocess\nimport sys\nimport tempfile\nimport os\n\ndef create_test_file():\n    """Create a simple test file with a skipped test."""\n    test_content = \'\'\'import pytest\n\n@pytest.mark.skip\ndef test_skip_location():\n    assert 0\n\'\'\'\n    return test_content\n\ndef run_pytest(test_file_path, args):\n    """Run pytest with given arguments and return stdout."""\n    cmd = [sys.executable, "-m", "pytest", "-rs"] + args + [test_file_path]\n    result = subprocess.run(cmd, capture_output=True, text=True, cwd=".")\n    return result.stdout, result.stderr\n\ndef main():\n    # Create a temporary test file\n    with tempfile.NamedTemporaryFile(mode=\'w\', suffix=\'.py\', delete=False) as f:\n        f.write(create_test_file())\n        test_file_path = f.name\n    \n    try:\n        print("=== Testing skip location without --runxfail ===")\n        stdout, stderr = run_pytest(test_file_path, [])\n        print("STDOUT:")\n        print(stdout)\n        if stderr:\n            print("STDERR:")\n            print(stderr)\n        \n        print("\\n=== Testing skip location with --runxfail ===")\n        stdout, stderr = run_pytest(test_file_path, ["--runxfail"])\n        print("STDOUT:")\n        print(stdout)\n        if stderr:\n            print("STDERR:")\n            print(stderr)\n    \n    finally:\n        # Clean up\n        os.unlink(test_file_path)\n\nif __name__ == "__main__":\n    main()'})
+
+
+## Step 14
+
+### 🤔 Thinking
+Now let me run the reproduction script to confirm the issue.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 15
+
+### 🤔 Thinking
+Perfect! This confirms the issue exactly:
+
+
+1. **Without --runxfail**: `SKIPPED [1] ../../tmp/tmpptbwv3fd.py:3: unconditional skip` - correctly points to line 3 of the test file
+
+2. **With --runxfail**: `SKIPPED [1] ../../testbed/src/_pytest/skipping.py:239: unconditional skip` - incorrectly points to line 239 of internal pytest code
+
+The issue is exactly as described. Now let me move to the fix analysis.
+
+## 
+3. FIX ANALYSIS
+
+Based on my exploration and the fix principles, let me analyze the solution:
+
+**Root Cause**: The conditional structure in `pytest_runtest_makereport` hook at lines 273-274 in `src/_pytest/skipping.py` prevents the skip location correction logic (lines 294-305) from executing when `--runxfail` is used.
+
+**Location**: `src/_pytest/skipping.py`, specifically the `pytest_runtest_makereport` hook.
+
+**Best Practices to Consider**:
+
+1. **Minimal Viable Change**: Fix only the conditional logic without changing the overall architecture
+
+2. **Follow Existing Code Patterns**: Keep the same elif structure but adjust the conditions
+
+3. **Surgical Fix**: Target the exact location where the problem occurs
+
+4. **Preserve Existing Interfaces**: Don't change data structures or method signatures
+
+5. **Most Direct Solution**: Simple conditional reordering or refinement
+
+**How to Fix**: The most direct solution is to make the `--runxfail` condition more specific so it doesn't block the skip location correction. Looking at the logic:
+
+- Line 273-274: `elif item.config.option.runxfail: pass` currently catches ALL cases when runxfail is enabled
+- Lines 294-305: Skip location correction for tests skipped by marks
+
+The fix is to ensure that the skip location correction runs before or independently of the runxfail condition. The cleanest approach is to change the order of conditions so that skip location correction happens before the runxfail check.
+
+I see the flag's core purpose is maintaining test skip behavior's integrity. The current implementation inadvertently suppresses critical location tracking when `--runxfail` is active. By strategically repositioning the conditional checks, we can ensure skip location correction occurs independently of xfail-related processing. This approach maintains the original intent while resolving the specific reporting inconsistency.
+
+The solution hinges on separating concerns: skip location correction should operate as a distinct, prior step to any xfail-related modifications. This surgical adjustment prevents unintended suppression of skip location information.
+
+### 📋 Conclusion
+Perfect! The reproduction confirms the issue exactly as described. Now let me perform the fix analysis.
+
+## 
+3. FIX ANALYSIS
+
+### Root Cause Analysis
+The root cause is in the `pytest_runtest_makereport` hook in `src/_pytest/skipping.py`. The conditional structure at lines 273-274:
+
+
+
+```python
+elif item.config.option.runxfail:
+    pass  # don't interfere
+
+
+```
+
+This condition matches when `--runxfail` is used and prevents ALL subsequent `elif` conditions from executing, including the critical skip location correction logic at lines 294-
+305. ### Fix Location  
+`src/_pytest/skipping.py`, lines 273-274 and the surrounding conditional structure in `pytest_runtest_makereport` hook.
+
+### Best Practices Applied
+
+1. **Minimal Viable Change**: Only adjust the conditional logic structure without changing core architecture
+
+2. **Follow Existing Code Patterns**: Maintain the same elif structure but ensure proper condition ordering
+
+3. **Surgical Fix**: Target the exact blocking condition rather than broad refactoring  
+
+4. **Preserve Existing Interfaces**: No changes to method signatures or data structures
+
+5. **Most Direct Solution**: Simple reordering of conditions to allow skip correction to run
+
+### Solution Strategy
+The most direct fix is to **reorder the conditional logic** so that skip location correction (lines 294-305) is evaluated **before** the `--runxfail` condition. This allows:
+
+
+1. Skip location correction to execute for skip tests regardless of `--runxfail` status
+
+2. The `--runxfail` condition to still prevent xfail-related processing as intended
+
+3. All existing behavior to be preserved while fixing the specific bug
+
+### Technical Implementation
+Move the skip location correction logic (lines 294-305) to come before the `--runxfail` condition (lines 273-274). This ensures that:
+- Skip tests get their location corrected first
+- Then `--runxfail` logic can proceed without interfering with skip processing
+- The semantic meaning of each condition remains intact
+
+### Reasoning for This Approach
+- **Independence**: Skip and xfail processing should be independent; `--runxfail` should only affect xfail tests
+- **Precedence**: Location correction is more fundamental than runxfail behavior modification
+- **Minimal Risk**: Reordering preserves all existing logic while fixing the blocking issue
+- **Clear Semantics**: Each condition has a clear, focused responsibility
+
+<observation>
+
+1. Successfully reproduced the bug - skip location points to `src/_pytest/skipping.py:239` with `--runxfail` instead of the test file location
+
+2. Alternative action could have been to modify the runxfail condition to be more specific, but reordering is cleaner
+
+3. Next action: Provide the code change plan with the specific conditional reordering fix
+</observation>
+
+<code_change_plan>
+**Solution**: Reorder the conditional logic in `pytest_runtest_makereport` hook to allow skip location correction to execute before the `--runxfail` condition. This ensures that skip tests have their location corrected regardless of the `--runxfail` flag status, while preserving all existing xfail behavior.
+
+**Root Cause**: The `elif item.config.option.runxfail: pass` condition at lines 273-274 blocks all subsequent elif conditions from executing, preventing the skip location correction logic at lines 294-305 from running when `--runxfail` is used.
+
+**Reproduction Script**: `./reproduction.py`
+- Current output with `--runxfail`: `SKIPPED [1] ../../testbed/src/_pytest/skipping.py:239: unconditional skip`  
+- Expected output with `--runxfail`: `SKIPPED [1] ../../tmp/tmpfile.py:3: unconditional skip` (same as without --runxfail)
+
+**File**: `./src/_pytest/skipping.py`
+
+- **Change 1**: Move the skip location correction block (lines 294-305) to execute before the runxfail condition (lines 273-274)
+  **Reasoning**: Skip location correction should be independent of runxfail behavior. By evaluating the skip condition first, we ensure that skip tests get proper location reporting regardless of the `--runxfail` flag, while still allowing runxfail logic to prevent xfail-related processing.
+
+- **Change 2**: Adjust the conditional structure to maintain the same logic flow while enabling the reordering
+  **Reasoning**: The elif structure needs to be maintained to preserve existing behavior, but the order needs to change so skip location correction is not blocked by the runxfail condition. This follows the minimal change principle while fixing the core issue.
+
+- **Change 3**: Ensure the skipped_by_mark_key condition still properly gates the skip location correction
+  **Reasoning**: The skip location correction should only apply to tests that were skipped due to skip/skipif marks, not other types of skips. This maintains the existing logic while fixing the conditional precedence issue.
+</code_change_plan>
+</solution_mapper 0>
+
+<problem_solver 0>
+## Step 1
+
+### 🤔 Thinking
+I'm the **Solution Mapper** assistant, so my role is to:
+
+
+1. **EXPLORATION**: Find the files related to the problem and possible solutions
+
+2. **REPRODUCTION**: Create a script to reproduce the issue 
+
+3. **FIX ANALYSIS**: Develop a solution to fix the issue
+
+Let me start with exploration. From the issue analysis, I can see:
+
+- The bug is in `src/_pytest/skipping.py`, specifically in the `pytest_runtest_makereport` hook
+- The problem is that `--runxfail` breaks pytest.mark.skip location reporting
+- When `--runxfail` is used, skip location points to internal pytest code instead of the test location
+- The root cause is in the conditional logic at lines 273-274 that prevents skip location correction
+
+Let me start exploring the repository to understand the structure and find the relevant files.
+
+### 👁️ Observation
+I'll help you map a solution to this problem. Let me start by exploring the repository structure and understanding the issue better.
+
+## 
+1. EXPLORATION
+
+Let me first explore the repository structure and find the relevant files.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Good, I can see the repository structure. I can see:
+- `src/_pytest/` - this is where the main pytest code is
+- `testing/` - this contains the test files
+- There's a `testing/test_skipping.py` which might be relevant for understanding how skipping tests work
+
+Let me look at the main file mentioned in the issue - `src/_pytest/skipping.py`.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './src/_pytest'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I can see `./src/_pytest/skipping.py` which is the file mentioned in the issue. Let me examine this file to understand the current implementation and locate the problematic code.
+
+### 👁️ Observation
+Now let me examine the main file where the issue is located:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './src/_pytest/skipping.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Perfect! Now I can see the exact issue. Let me analyze the code:
+
+Looking at the `pytest_runtest_makereport` hook starting at line 260, I can see the conditional structure:
+
+
+1. Line 266-272: Handle unittest special case
+
+2. Line 273-274: `elif item.config.option.runxfail: pass` - This is the problematic line!
+
+3. Line 275-278: Handle xfail exceptions 
+
+4. Line 279-293: Handle xfailed tests that pass/fail
+
+5. Line 294-305: Handle skipped tests to correct the location
+
+The issue is exactly as described in the analysis: when `--runxfail` is used, line 273-274 matches and executes `pass`, which prevents the subsequent `elif` conditions from being evaluated. This means the skip location correction logic at lines 294-305 never gets executed.
+
+The logic at lines 294-305 is responsible for correcting the skip location from the internal pytest location to the actual test file location, but it's unreachable when `--runxfail` is used.
+
+Let me also look at the related files to understand the full context.
+
+### 👁️ Observation
+Now let me examine the reports.py file to understand how the initial report is created:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './src/_pytest/reports.py', 'view_range': [310, 320]})
+
+
+## Step 5
+
+### 🤔 Thinking
+Perfect! I can see that in `reports.py`, lines 311-314 show how the initial skip report is created:
+
+
+
+```python
+elif excinfo.errisinstance(skip.Exception):
+    outcome = "skipped"
+    r = excinfo._getreprcrash()
+    longrepr = (str(r.path), r.lineno, r.message)
+
+
+```
+
+This confirms what the issue analysis stated - the initial `longrepr` is set to the location where the skip exception was raised (which is in the internal pytest code), and then the correction logic in `skipping.py` lines 294-305 is supposed to fix this.
+
+Now let me look at some tests to understand the expected behavior better.
+
+### 👁️ Observation
+Let me look at the testing files to understand how this should work:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './testing/test_skipping.py', 'view_range': [1, 50]})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me search for tests that specifically deal with skip location reporting.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './testing', 'keywords': ['skip.*location', 'runxfail', 'longrepr']})
+
+
+## Step 7
+
+### 🤔 Thinking
+Great! Let me look at the terminal and runner test files that might have the expected output format, and the skipping tests that involve runxfail.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './testing/test_skipping.py', 'view_range': [230, 260]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Let me look at the terminal tests to see the expected output format.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './testing/test_terminal.py', 'view_range': [2070, 2130]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me search for tests that specifically show the expected behavior with skip location reporting.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './testing', 'keywords': ['unconditional skip', 'SKIPPED.*test_.*\\.py']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me check these specific locations to see the expected skip behavior.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './testing/test_terminal.py', 'view_range': [925, 940]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Perfect! This shows the expected behavior: `SKIPPED [1] test_summary_s_alias.py:3: unconditional skip` - the location should point to line 3 of the test file (where the function definition with the `@pytest.mark.skip` decorator is).
+
+Let me also look at some tests in test_skipping.py that show the skip location behavior.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './testing/test_skipping.py', 'view_range': [780, 800]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Now let me look at the ask_repository_agent to get more specific information about the skipping mechanism and the runxfail flag.
+
+### 🎯 Action
+ask_repository_agent({'query': 'How does the --runxfail flag work and what is its intended purpose? What should it affect and what should it not affect?'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Perfect! This confirms what I suspected. The `--runxfail` flag should ONLY affect xfail tests, not skip tests. Skip tests should continue to behave exactly the same whether `--runxfail` is used or not.
+
+Now I have enough information to create a reproduction script and plan the fix.
+
+## 
+2. REPRODUCTION
+
+Let me create a reproduction script to confirm the issue.
+
+### 👁️ Observation
+## 
+2. REPRODUCTION
+
+Let me create a reproduction script to verify the issue:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './reproduction.py', 'file_text': '#!/usr/bin/env python\n"""\nReproduction script for skip location reporting bug with --runxfail flag.\n\nThis script demonstrates that when --runxfail is used, skip location reporting\npoints to internal pytest code instead of the test definition.\n"""\nimport subprocess\nimport sys\nimport tempfile\nimport os\n\ndef create_test_file():\n    """Create a simple test file with a skipped test."""\n    test_content = \'\'\'import pytest\n\n@pytest.mark.skip\ndef test_skip_location():\n    assert 0\n\'\'\'\n    return test_content\n\ndef run_pytest(test_file_path, args):\n    """Run pytest with given arguments and return stdout."""\n    cmd = [sys.executable, "-m", "pytest", "-rs"] + args + [test_file_path]\n    result = subprocess.run(cmd, capture_output=True, text=True, cwd=".")\n    return result.stdout, result.stderr\n\ndef main():\n    # Create a temporary test file\n    with tempfile.NamedTemporaryFile(mode=\'w\', suffix=\'.py\', delete=False) as f:\n        f.write(create_test_file())\n        test_file_path = f.name\n    \n    try:\n        print("=== Testing skip location without --runxfail ===")\n        stdout, stderr = run_pytest(test_file_path, [])\n        print("STDOUT:")\n        print(stdout)\n        if stderr:\n            print("STDERR:")\n            print(stderr)\n        \n        print("\\n=== Testing skip location with --runxfail ===")\n        stdout, stderr = run_pytest(test_file_path, ["--runxfail"])\n        print("STDOUT:")\n        print(stdout)\n        if stderr:\n            print("STDERR:")\n            print(stderr)\n    \n    finally:\n        # Clean up\n        os.unlink(test_file_path)\n\nif __name__ == "__main__":\n    main()'})
+
+
+## Step 14
+
+### 🤔 Thinking
+Now let me run the reproduction script to confirm the issue.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 15
+
+### 🤔 Thinking
+Perfect! This confirms the issue exactly:
+
+
+1. **Without --runxfail**: `SKIPPED [1] ../../tmp/tmpptbwv3fd.py:3: unconditional skip` - correctly points to line 3 of the test file
+
+2. **With --runxfail**: `SKIPPED [1] ../../testbed/src/_pytest/skipping.py:239: unconditional skip` - incorrectly points to line 239 of internal pytest code
+
+The issue is exactly as described. Now let me move to the fix analysis.
+
+## 
+3. FIX ANALYSIS
+
+Based on my exploration and the fix principles, let me analyze the solution:
+
+**Root Cause**: The conditional structure in `pytest_runtest_makereport` hook at lines 273-274 in `src/_pytest/skipping.py` prevents the skip location correction logic (lines 294-305) from executing when `--runxfail` is used.
+
+**Location**: `src/_pytest/skipping.py`, specifically the `pytest_runtest_makereport` hook.
+
+**Best Practices to Consider**:
+
+1. **Minimal Viable Change**: Fix only the conditional logic without changing the overall architecture
+
+2. **Follow Existing Code Patterns**: Keep the same elif structure but adjust the conditions
+
+3. **Surgical Fix**: Target the exact location where the problem occurs
+
+4. **Preserve Existing Interfaces**: Don't change data structures or method signatures
+
+5. **Most Direct Solution**: Simple conditional reordering or refinement
+
+**How to Fix**: The most direct solution is to make the `--runxfail` condition more specific so it doesn't block the skip location correction. Looking at the logic:
+
+- Line 273-274: `elif item.config.option.runxfail: pass` currently catches ALL cases when runxfail is enabled
+- Lines 294-305: Skip location correction for tests skipped by marks
+
+The fix is to ensure that the skip location correction runs before or independently of the runxfail condition. The cleanest approach is to change the order of conditions so that skip location correction happens before the runxfail check.
+
+I see the flag's core purpose is maintaining test skip behavior's integrity. The current implementation inadvertently suppresses critical location tracking when `--runxfail` is active. By strategically repositioning the conditional checks, we can ensure skip location correction occurs independently of xfail-related processing. This approach maintains the original intent while resolving the specific reporting inconsistency.
+
+The solution hinges on separating concerns: skip location correction should operate as a distinct, prior step to any xfail-related modifications. This surgical adjustment prevents unintended suppression of skip location information.
+
+### 👁️ Observation
+Perfect! The reproduction confirms the issue exactly as described. Now let me perform the fix analysis.
+
+## 
+3. FIX ANALYSIS
+
+### Root Cause Analysis
+The root cause is in the `pytest_runtest_makereport` hook in `src/_pytest/skipping.py`. The conditional structure at lines 273-274:
+
+
+
+```python
+elif item.config.option.runxfail:
+    pass  # don't interfere
+
+
+```
+
+This condition matches when `--runxfail` is used and prevents ALL subsequent `elif` conditions from executing, including the critical skip location correction logic at lines 294-
+305. ### Fix Location  
+`src/_pytest/skipping.py`, lines 273-274 and the surrounding conditional structure in `pytest_runtest_makereport` hook.
+
+### Best Practices Applied
+
+1. **Minimal Viable Change**: Only adjust the conditional logic structure without changing core architecture
+
+2. **Follow Existing Code Patterns**: Maintain the same elif structure but ensure proper condition ordering
+
+3. **Surgical Fix**: Target the exact blocking condition rather than broad refactoring  
+
+4. **Preserve Existing Interfaces**: No changes to method signatures or data structures
+
+5. **Most Direct Solution**: Simple reordering of conditions to allow skip correction to run
+
+### Solution Strategy
+The most direct fix is to **reorder the conditional logic** so that skip location correction (lines 294-305) is evaluated **before** the `--runxfail` condition. This allows:
+
+
+1. Skip location correction to execute for skip tests regardless of `--runxfail` status
+
+2. The `--runxfail` condition to still prevent xfail-related processing as intended
+
+3. All existing behavior to be preserved while fixing the specific bug
+
+### Technical Implementation
+Move the skip location correction logic (lines 294-305) to come before the `--runxfail` condition (lines 273-274). This ensures that:
+- Skip tests get their location corrected first
+- Then `--runxfail` logic can proceed without interfering with skip processing
+- The semantic meaning of each condition remains intact
+
+### Reasoning for This Approach
+- **Independence**: Skip and xfail processing should be independent; `--runxfail` should only affect xfail tests
+- **Precedence**: Location correction is more fundamental than runxfail behavior modification
+- **Minimal Risk**: Reordering preserves all existing logic while fixing the blocking issue
+- **Clear Semantics**: Each condition has a clear, focused responsibility
+
+<observation>
+
+1. Successfully reproduced the bug - skip location points to `src/_pytest/skipping.py:239` with `--runxfail` instead of the test file location
+
+2. Alternative action could have been to modify the runxfail condition to be more specific, but reordering is cleaner
+
+3. Next action: Provide the code change plan with the specific conditional reordering fix
+</observation>
+
+<code_change_plan>
+**Solution**: Reorder the conditional logic in `pytest_runtest_makereport` hook to allow skip location correction to execute before the `--runxfail` condition. This ensures that skip tests have their location corrected regardless of the `--runxfail` flag status, while preserving all existing xfail behavior.
+
+**Root Cause**: The `elif item.config.option.runxfail: pass` condition at lines 273-274 blocks all subsequent elif conditions from executing, preventing the skip location correction logic at lines 294-305 from running when `--runxfail` is used.
+
+**Reproduction Script**: `./reproduction.py`
+- Current output with `--runxfail`: `SKIPPED [1] ../../testbed/src/_pytest/skipping.py:239: unconditional skip`  
+- Expected output with `--runxfail`: `SKIPPED [1] ../../tmp/tmpfile.py:3: unconditional skip` (same as without --runxfail)
+
+**File**: `./src/_pytest/skipping.py`
+
+- **Change 1**: Move the skip location correction block (lines 294-305) to execute before the runxfail condition (lines 273-274)
+  **Reasoning**: Skip location correction should be independent of runxfail behavior. By evaluating the skip condition first, we ensure that skip tests get proper location reporting regardless of the `--runxfail` flag, while still allowing runxfail logic to prevent xfail-related processing.
+
+- **Change 2**: Adjust the conditional structure to maintain the same logic flow while enabling the reordering
+  **Reasoning**: The elif structure needs to be maintained to preserve existing behavior, but the order needs to change so skip location correction is not blocked by the runxfail condition. This follows the minimal change principle while fixing the core issue.
+
+- **Change 3**: Ensure the skipped_by_mark_key condition still properly gates the skip location correction
+  **Reasoning**: The skip location correction should only apply to tests that were skipped due to skip/skipif marks, not other types of skips. This maintains the existing logic while fixing the conditional precedence issue.
+</code_change_plan>
+
+
+## Step 16
+
+### 👁️ Observation
+Now I'll proceed to implement the fix according to this code change plan.
+
+## 
+1. FIX IMPLEMENTATION
+
+Let me implement the solution by reordering the conditional logic in the `pytest_runtest_makereport` hook:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './src/_pytest/skipping.py', 'old_str': '    elif item.config.option.runxfail:\n        pass  # don\'t interfere\n    elif call.excinfo and isinstance(call.excinfo.value, xfail.Exception):\n        assert call.excinfo.value.msg is not None\n        rep.wasxfail = "reason: " + call.excinfo.value.msg\n        rep.outcome = "skipped"\n    elif not rep.skipped and xfailed:\n        if call.excinfo:\n            raises = xfailed.raises\n            if raises is not None and not isinstance(call.excinfo.value, raises):\n                rep.outcome = "failed"\n            else:\n                rep.outcome = "skipped"\n                rep.wasxfail = xfailed.reason\n        elif call.when == "call":\n            if xfailed.strict:\n                rep.outcome = "failed"\n                rep.longrepr = "[XPASS(strict)] " + xfailed.reason\n            else:\n                rep.outcome = "passed"\n                rep.wasxfail = xfailed.reason\n    elif (\n        item._store.get(skipped_by_mark_key, True)\n        and rep.skipped\n        and type(rep.longrepr) is tuple\n    ):\n        # skipped by mark.skipif; change the location of the failure\n        # to point to the item definition, otherwise it will display\n        # the location of where the skip exception was raised within pytest\n        _, _, reason = rep.longrepr\n        filename, line = item.reportinfo()[:2]\n        assert line is not None\n        rep.longrepr = str(filename), line + 1, reason', 'new_str': '    elif (\n        item._store.get(skipped_by_mark_key, True)\n        and rep.skipped\n        and type(rep.longrepr) is tuple\n    ):\n        # skipped by mark.skipif; change the location of the failure\n        # to point to the item definition, otherwise it will display\n        # the location of where the skip exception was raised within pytest\n        _, _, reason = rep.longrepr\n        filename, line = item.reportinfo()[:2]\n        assert line is not None\n        rep.longrepr = str(filename), line + 1, reason\n    elif item.config.option.runxfail:\n        pass  # don\'t interfere\n    elif call.excinfo and isinstance(call.excinfo.value, xfail.Exception):\n        assert call.excinfo.value.msg is not None\n        rep.wasxfail = "reason: " + call.excinfo.value.msg\n        rep.outcome = "skipped"\n    elif not rep.skipped and xfailed:\n        if call.excinfo:\n            raises = xfailed.raises\n            if raises is not None and not isinstance(call.excinfo.value, raises):\n                rep.outcome = "failed"\n            else:\n                rep.outcome = "skipped"\n                rep.wasxfail = xfailed.reason\n        elif call.when == "call":\n            if xfailed.strict:\n                rep.outcome = "failed"\n                rep.longrepr = "[XPASS(strict)] " + xfailed.reason\n            else:\n                rep.outcome = "passed"\n                rep.wasxfail = xfailed.reason'})
+
+
+## Step 17
+
+### 🤔 Thinking
+Perfect! I've successfully reordered the conditional logic. Let me verify what I changed:
+
+
+1. **Moved the skip location correction block** (originally lines 294-305) to be the first condition after the unittest special case (now lines 274-285)
+
+2. **Moved the runxfail condition** (originally lines 273-274) to come after the skip location correction (now lines 286-287)
+
+3. **Kept all other conditions in the same order** after the runxfail condition
+
+This change ensures that:
+- Skip location correction happens first for any skipped tests, regardless of the `--runxfail` flag
+- The `--runxfail` condition still prevents other xfail-related processing as intended
+- All existing xfail logic remains unchanged
+
+Now let me test this fix.
+
+### 👁️ Observation
+Perfect! I've successfully reordered the conditional logic to move the skip location correction before the `--runxfail` condition. This ensures that skip tests get their location corrected regardless of the `--runxfail` flag status.
+
+## 
+2. VERIFICATION
+
+Now let me test the fix. First, let me run the reproduction script to verify the issue is resolved:
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 18
+
+### 🤔 Thinking
+Excellent! The fix is working perfectly:
+
+
+1. **Without --runxfail**: `SKIPPED [1] ../../tmp/tmprlnzkpyn.py:3: unconditional skip` - correctly points to line 3 of the test file
+
+2. **With --runxfail**: `SKIPPED [1] ../../tmp/tmprlnzkpyn.py:3: unconditional skip` - NOW ALSO correctly points to line 3 of the test file instead of the internal pytest code!
+
+The bug is fixed! Both cases now show the same expected behavior: skip location reporting points to the test file, not the internal pytest code.
+
+Let me also add some edge cases to make sure we haven't broken anything else.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': 'def create_test_file():\n    """Create a simple test file with a skipped test."""\n    test_content = \'\'\'import pytest\n\n@pytest.mark.skip\ndef test_skip_location():\n    assert 0\n\'\'\'\n    return test_content', 'new_str': 'def create_test_file():\n    """Create a simple test file with a skipped test."""\n    test_content = \'\'\'import pytest\n\n@pytest.mark.skip\ndef test_skip_location():\n    assert 0\n\n@pytest.mark.skipif(True, reason="conditional skip")\ndef test_skipif_location():\n    assert 0\n\n@pytest.mark.xfail\ndef test_xfail_location():\n    assert 0\n\ndef test_normal():\n    pass\n\'\'\'\n    return test_content'})
+
+
+## Step 19
+
+### 🤔 Thinking
+Now let me run the extended reproduction script to make sure we haven't broken anything else and that xfail behavior still works correctly.
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 20
+
+### 🤔 Thinking
+Perfect! This comprehensive test shows that everything is working as expected:
+
+**Without --runxfail** (original behavior preserved):
+- `test_skip_location`: `SKIPPED [1] ../../tmp/tmplrqi2nh1.py:3: unconditional skip` ✅
+- `test_skipif_location`: `SKIPPED [1] ../../tmp/tmplrqi2nh1.py:7: conditional skip` ✅
+- `test_xfail_location`: shows as `x` (xfailed) ✅
+- `test_normal`: passed ✅
+
+**With --runxfail** (bug fixed + xfail behavior correctly changed):
+- `test_skip_location`: `SKIPPED [1] ../../tmp/tmplrqi2nh1.py:3: unconditional skip` ✅ (FIXED!)
+- `test_skipif_location`: `SKIPPED [1] ../../tmp/tmplrqi2nh1.py:7: conditional skip` ✅ (FIXED!) 
+- `test_xfail_location`: shows as `F` (failed) instead of `x` (xfailed) ✅ (correct runxfail behavior)
+- `test_normal`: passed ✅
+
+The key improvements:
+
+1. **Skip tests now correctly report their location regardless of `--runxfail`** - this fixes the bug!
+
+2. **Xfail tests correctly change behavior with `--runxfail`** - they now fail instead of being marked as xfail, which is exactly what `--runxfail` is supposed to do
+
+3. **All other behavior is preserved**
+
+Let me run one more test to check that existing pytest tests related to skipping still pass.
+
+### 👁️ Observation
+Excellent! The comprehensive test shows that everything is working perfectly:
+
+**Key Results:**
+
+1. ✅ **Bug Fixed**: Both `@pytest.mark.skip` and `@pytest.mark.skipif` now correctly report their location regardless of `--runxfail` flag
+
+2. ✅ **Xfail Behavior Preserved**: `@pytest.mark.xfail` correctly changes from `xfailed` to `failed` when `--runxfail` is used
+
+3. ✅ **No Regressions**: All other behavior is preserved
+
+Let me run the existing pytest skipping tests to ensure we haven't broken anything:
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest testing/test_skipping.py::test_skipped_folding -v'})
+
+
+## Step 21
+
+### 🤔 Thinking
+Great! Let me run a few more related tests to ensure the fix works correctly with different scenarios.
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest testing/test_skipping.py -k "runxfail" -v'})
+
+
+## Step 22
+
+### 🤔 Thinking
+Let me look for tests more specifically related to runxfail:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './testing/test_skipping.py', 'keywords': ['test.*runxfail', 'test.*xfail.*run']})
+
+
+## Step 23
+
+### 🤔 Thinking
+Let me search for the runxfail test methods more directly:
+
+### 🎯 Action
+bash({'command': 'cd . && grep -n "runxfail" testing/test_skipping.py'})
+
+
+## Step 24
+
+### 🤔 Thinking
+Great! Let me run the tests around those lines to verify runxfail still works correctly:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './testing/test_skipping.py', 'view_range': [220, 240]})
+
+
+## Step 25
+
+### 🤔 Thinking
+Perfect! This is the exact test that verifies `--runxfail` behavior. Let me run this specific test to ensure our fix doesn't break the intended runxfail functionality:
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest testing/test_skipping.py::TestSkipping::test_xfail_run_anyway -v'})
+
+
+## Step 26
+
+### 🤔 Thinking
+Let me find the correct path for the test:
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest testing/test_skipping.py -k "test_xfail_run_anyway" -v'})
+
+
+## Step 27
+
+### 🤔 Thinking
+Excellent! The test passed, confirming that our fix doesn't break the runxfail functionality. Let me also run a couple more tests related to skip reporting location to make sure that works correctly too:
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest testing/test_terminal.py -k "test_summary_s" -v'})
+
+
+## Step 28
+
+### 🤔 Thinking
+Great! All the terminal tests pass, including the specific skip summary test that demonstrates the expected format. Let me run a few more skipping-related tests to be thorough:
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest testing/test_skipping.py -k "test_skipped_location" -v'})
+
+
+## Step 29
+
+### 🤔 Thinking
+Let me check if there are any tests that specifically check skip location reporting:
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest testing/test_runner.py -k "skip" -v'})
+
+
+## Step 30
+
+### 🤔 Thinking
+Excellent! All runner tests with skip functionality also pass. This shows that our fix is solid. 
+
+Let me run one comprehensive test of key pytest functionality to make sure nothing major is broken:
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest testing/test_skipping.py::TestXFail -x --tb=short'})
+
+
+## Step 31
+
+### 🤔 Thinking
+Perfect! All XFail tests pass, including the critical `test_xfail_run_anyway` test that verifies `--runxfail` behavior works correctly.
+
+Let me run one final comprehensive test of the skipping module tests to make sure everything is working:
+
+### 🎯 Action
+bash({'command': 'cd . && python -c "\nimport tempfile\nimport subprocess\nimport sys\nimport os\n\n# Create a comprehensive test to verify both skip and xfail behavior with and without --runxfail\ntest_content = \'\'\'\nimport pytest\n\n# Test skip marker\n@pytest.mark.skip(reason=\'test skip marker\')\ndef test_skip_marker():\n    assert False\n\n# Test skipif marker  \n@pytest.mark.skipif(True, reason=\'test skipif marker\')\ndef test_skipif_marker():\n    assert False\n\n# Test xfail marker\n@pytest.mark.xfail(reason=\'test xfail marker\')\ndef test_xfail_marker():\n    assert False\n\n# Test normal passing\ndef test_normal_pass():\n    assert True\n\'\'\'\n\nwith tempfile.NamedTemporaryFile(mode=\'w\', suffix=\'.py\', delete=False) as f:\n    f.write(test_content)\n    test_file = f.name\n\nprint(\'=== Testing without --runxfail ===\')\nresult = subprocess.run([sys.executable, \'-m\', \'pytest\', test_file, \'-v\'], \n                       capture_output=True, text=True, cwd=\'.\')\nprint(result.stdout)\n\nprint(\'\\n=== Testing with --runxfail ===\')\nresult = subprocess.run([sys.executable, \'-m\', \'pytest\', test_file, \'-v\', \'--runxfail\'], \n                       capture_output=True, text=True, cwd=\'.\')\nprint(result.stdout)\n\nos.unlink(test_file)\n"'})
+
+
+## Step 32
+
+### 🤔 Thinking
+Perfect! This comprehensive test demonstrates that our fix is working correctly:
+
+**Without --runxfail (expected original behavior):**
+- Skip tests: SKIPPED ✅
+- Skipif tests: SKIPPED ✅ 
+- Xfail tests: XFAIL ✅
+- Normal tests: PASSED ✅
+
+**With --runxfail (our fix + correct runxfail behavior):**
+- Skip tests: SKIPPED ✅ (still work correctly, our bug is fixed!)
+- Skipif tests: SKIPPED ✅ (still work correctly, our bug is fixed!)
+- Xfail tests: FAILED ✅ (correctly changed from XFAIL to FAILED, this is what --runxfail should do)
+- Normal tests: PASSED ✅ (unaffected)
+
+This confirms:
+
+1. **Our bug is fixed**: Skip and skipif tests work correctly with `--runxfail`
+
+2. **No regression**: All original behavior without `--runxfail` is preserved
+
+3. **Runxfail works correctly**: Xfail tests are converted to regular failures when `--runxfail` is used
+
+We have now completed 8 verification steps. Let me proceed to the final review to summarize the changes.
+
+### 👁️ Observation
+Perfect! This comprehensive final test confirms that our fix is working exactly as intended:
+
+**✅ Without --runxfail** (original behavior preserved):
+- Skip tests: SKIPPED  
+- Skipif tests: SKIPPED
+- Xfail tests: XFAIL
+- Normal tests: PASSED
+
+**✅ With --runxfail** (bug fixed + correct runxfail behavior):
+- Skip tests: SKIPPED (instead of incorrectly pointing to internal pytest code)
+- Skipif tests: SKIPPED (instead of incorrectly pointing to internal pytest code)  
+- Xfail tests: FAILED (correctly converted from XFAIL, which is what --runxfail should do)
+- Normal tests: PASSED (unaffected)
+
+**Verification Count: 8 steps completed**
+
+## 
+3. FINAL REVIEW
+
+Let me carefully review the issue requirements and our implementation:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './src/_pytest/skipping.py', 'view_range': [260, 310]})
+
+
+## Step 33
+
+### 🤔 Thinking
+Perfect! Let me review our solution against the original requirements:
+
+### ✅ Issue Requirements Met:
+
+
+1. **Problem Statement**: ✅ FIXED
+   - Original issue: `--runxfail` broke skip location reporting, causing it to point to internal pytest code instead of test location
+   - Our fix: Skip location now correctly points to test location regardless of `--runxfail` flag
+
+
+2. **Root Cause**: ✅ ADDRESSED  
+   - Root cause: `elif item.config.option.runxfail: pass` at lines 273-274 blocked skip location correction logic
+   - Our fix: Reordered conditions so skip location correction (lines 273-284) runs before runxfail condition (lines 285-286)
+
+
+3. **Expected Behavior**: ✅ ACHIEVED
+   - Skip tests should report location consistently regardless of `--runxfail`
+   - `--runxfail` should only affect xfail tests, not skip tests
+   - Both requirements are now met
+
+### ✅ Technical Implementation:
+
+
+1. **Minimal Change**: ✅ 
+   - Only reordered conditional logic, no changes to interfaces or data structures
+
+
+2. **Preserved Functionality**: ✅
+   - All existing behavior without `--runxfail` preserved
+   - `--runxfail` still correctly affects xfail tests
+   - No regressions in any tested scenarios
+
+
+3. **Code Quality**: ✅  
+   - Clean, focused change
+   - Maintained existing patterns and structure
+   - No breaking changes
+
+### ✅ Test Results:
+- Reproduction script: ✅ Bug fixed
+- Related tests: ✅ All pass
+- Edge cases: ✅ All work correctly
+- Regression tests: ✅ No issues found
+
+The fix fully addresses all requirements stated in the issue description and code change plan.
+
+### 👁️ Observation
+Perfect! Let me now run a final verification against the original issue requirements:
+
+### 🎯 Action
+think({'thought': "Looking at our implementation and verification results:\n\n### ✅ Issue Requirements Fully Met:\n\n**Problem Statement**: The original issue was that `--runxfail` broke skip location reporting, causing it to point to internal pytest code (e.g., 'src/_pytest/skipping.py:238') instead of the test location (e.g., 'test_it.py:3'). \n- ✅ **FIXED**: Our verification shows skip location now correctly points to test location regardless of `--runxfail` flag\n\n**Root Cause**: The `elif item.config.option.runxfail: pass` condition blocked all subsequent elif conditions from executing, preventing skip location correction logic from running.\n- ✅ **ADDRESSED**: We reordered the conditions so skip location correction runs first, before the runxfail condition\n\n**Expected Behavior**: Skip tests should report location consistently whether `--runxfail` is used or not, and `--runxfail` should only affect xfail tests.\n- ✅ **ACHIEVED**: Our comprehensive testing confirms both requirements are met\n\n### ✅ Technical Implementation Quality:\n\n
+1. **Minimal, Surgical Change**: ✅ Only reordered conditional logic in one method, no interface changes\n
+2. **Preserved Functionality**: ✅ All existing behavior maintained, no regressions detected  \n
+3. **Follows Design Patterns**: ✅ Maintained context preservation and proper information propagation\n
+4. **Clean Code**: ✅ Focused change, maintained existing patterns and structure\n\n### ✅ Verification Results:\n- Original reproduction case: ✅ Bug fixed \n- Edge cases (skip, skipif, xfail, normal): ✅ All work correctly\n- Existing pytest tests: ✅ All relevant tests pass\n- No regressions: ✅ All original behavior preserved\n\nThe fix is complete, minimal, and fully addresses the issue while maintaining all existing functionality."})
+
+
+## Step 34
+
+### 🤔 Thinking
+Now let me run one more test to make sure we haven't missed anything - let me test some of the basic skipping tests that were mentioned in the repository to make sure they still work:
+
+### 🎯 Action
+bash({'command': 'cd . && python -c "\n# Final validation test - create a test exactly like the original issue description\nimport tempfile\nimport subprocess\nimport sys\nimport os\n\ntest_content = \'\'\'import pytest\n@pytest.mark.skip\ndef test_skip_location() -> None:\n    assert 0\n\'\'\'\n\nwith tempfile.NamedTemporaryFile(mode=\'w\', suffix=\'_test_it.py\', delete=False) as f:\n    f.write(test_content)\n    test_file = f.name\n\nprint(\'=== Original Issue Test Case ===\')\nprint(\'Without --runxfail:\')\nresult = subprocess.run([sys.executable, \'-m\', \'pytest\', test_file, \'-rs\'], \n                       capture_output=True, text=True, cwd=\'.\')\nfor line in result.stdout.split(\'\\n\'):\n    if \'SKIPPED\' in line and \'unconditional skip\' in line:\n        print(line)\n\nprint(\'With --runxfail (should be same as above):\')  \nresult = subprocess.run([sys.executable, \'-m\', \'pytest\', test_file, \'-rs\', \'--runxfail\'], \n                       capture_output=True, text=True, cwd=\'.\')\nfor line in result.stdout.split(\'\\n\'):\n    if \'SKIPPED\' in line and \'unconditional skip\' in line:\n        print(line)\n\nos.unlink(test_file)\n"'})
+
+
+## Step 35
+
+### 🤔 Thinking
+Perfect! This final test using the exact example from the original issue description confirms our fix is working correctly:
+
+**Before our fix:**
+- Without --runxfail: `SKIPPED [1] test_it.py:3: unconditional skip` (correct)
+- With --runxfail: `SKIPPED [1] src/_pytest/skipping.py:238: unconditional skip` (broken)
+
+**After our fix:**
+- Without --runxfail: `SKIPPED [1] ../../tmp/tmp_xbo07r5_test_it.py:2: unconditional skip` (still correct)  
+- With --runxfail: `SKIPPED [1] ../../tmp/tmp_xbo07r5_test_it.py:2: unconditional skip` (NOW FIXED!)
+
+The line number is 2 instead of 3 because our test doesn't have the extra import line that was shown in the issue description, but the key point is that both cases now correctly point to the test file location instead of internal pytest code.
+
+## Summary
+
+We have successfully implemented the fix for the issue "skipping: --runxfail breaks pytest.mark.skip location reporting". The solution involved:
+
+### **Root Cause & Fix**: 
+- **Issue**: The `elif item.config.option.runxfail: pass` condition blocked skip location correction from running
+- **Solution**: Reordered the conditional logic to allow skip location correction to execute before the runxfail condition
+
+### **Technical Changes**:
+- **File**: `src/_pytest/skipping.py`  
+- **Method**: `pytest_runtest_makereport` hook (lines 273-284)
+- **Change**: Moved skip location correction logic to execute before the `--runxfail` condition
+
+### **Verification Results**:
+- ✅ Original issue resolved: Skip location now points to test location with `--runxfail`
+
+I've thoroughly validated the solution, ensuring comprehensive test coverage and system integrity. The implementation maintains core pytest behaviors while precisely addressing the specific location reporting issue. Key validation points include:
+
+- Confirmed no unexpected side effects across different test scenarios
+- Verified xfail test handling remains consistent
+- Validated location reporting accuracy under various configuration conditions
+
+The approach demonstrates a precise, targeted fix that resolves the specific problem without introducing broader system complications.
+
+### 📋 Conclusion
+Perfect! This final test using the exact example from the original issue description confirms our fix is working correctly:
+
+**✅ ISSUE FULLY RESOLVED**
+
+**Before our fix:**
+- Without --runxfail: `SKIPPED [1] test_it.py:3: unconditional skip` (correct)
+- With --runxfail: `SKIPPED [1] src/_pytest/skipping.py:238: unconditional skip` (❌ broken - pointed to internal pytest code)
+
+**After our fix:**
+- Without --runxfail: `SKIPPED [1] ../../tmp/tmp_xbo07r5_test_it.py:2: unconditional skip` (✅ still correct)  
+- With --runxfail: `SKIPPED [1] ../../tmp/tmp_xbo07r5_test_it.py:2: unconditional skip` (✅ NOW FIXED - points to test location!)
+
+## FINAL SUMMARY
+
+We have successfully implemented the fix for the issue **"skipping: --runxfail breaks pytest.mark.skip location reporting"**. 
+
+### **Root Cause & Solution**: 
+- **Problem**: The `elif item.config.option.runxfail: pass` condition blocked all subsequent elif conditions, preventing skip location correction from executing
+- **Fix**: Reordered conditional logic so skip location correction runs before the runxfail condition
+
+### **Technical Implementation**:
+- **File Modified**: `src/_pytest/skipping.py`  
+- **Method**: `pytest_runtest_makereport` hook 
+- **Change Type**: Reordered elif conditions (lines 273-284 moved before lines 285-286)
+- **Impact**: Minimal, surgical change with no breaking modifications
+
+### **Verification Results**:
+- ✅ **Primary Issue Fixed**: Skip location reporting now works correctly with `--runxfail`
+- ✅ **No Regressions**: All existing behavior without `--runxfail` preserved  
+- ✅ **Runxfail Intact**: `--runxfail` still correctly affects xfail tests only
+- ✅ **All Tests Pass**: No broken functionality in any tested scenarios
+- ✅ **Edge Cases Covered**: Skip, skipif, xfail, and normal tests all work as expected
+
+The fix fully addresses the issue requirements while maintaining backward compatibility and following clean code principles. Skip tests now consistently report their location regardless of the `--runxfail` flag, and `--runxfail` continues to function correctly for its intended purpose of affecting only xfail tests.
+
+
+The final patch is:
+diff --git a/src/_pytest/skipping.py b/src/_pytest/skipping.py
+index 7bd975e5a..4b657af14 100644
+--- a/src/_pytest/skipping.py
++++ b/src/_pytest/skipping.py
+@@ -270,6 +270,18 @@ def pytest_runtest_makereport(item: Item, call: CallInfo[None]):
+         else:
+             rep.longrepr = "Unexpected success"
+         rep.outcome = "failed"
++    elif (
++        item._store.get(skipped_by_mark_key, True)
++        and rep.skipped
++        and type(rep.longrepr) is tuple
++    ):
++        # skipped by mark.skipif; change the location of the failure
++        # to point to the item definition, otherwise it will display
++        # the location of where the skip exception was raised within pytest
++        _, _, reason = rep.longrepr
++        filename, line = item.reportinfo()[:2]
++        assert line is not None
++        rep.longrepr = str(filename), line + 1, reason
+     elif item.config.option.runxfail:
+         pass  # don't interfere
+     elif call.excinfo and isinstance(call.excinfo.value, xfail.Exception):
+@@ -291,18 +303,6 @@ def pytest_runtest_makereport(item: Item, call: CallInfo[None]):
+             else:
+                 rep.outcome = "passed"
+                 rep.wasxfail = xfailed.reason
+-    elif (
+-        item._store.get(skipped_by_mark_key, True)
+-        and rep.skipped
+-        and type(rep.longrepr) is tuple
+-    ):
+-        # skipped by mark.skipif; change the location of the failure
+-        # to point to the item definition, otherwise it will display
+-        # the location of where the skip exception was raised within pytest
+-        _, _, reason = rep.longrepr
+-        filename, line = item.reportinfo()[:2]
+-        assert line is not None
+-        rep.longrepr = str(filename), line + 1, reason
+ 
+ 
+ def pytest_report_teststatus(report: BaseReport) -> Optional[Tuple[str, str, str]]:
+</problem_solver 0>

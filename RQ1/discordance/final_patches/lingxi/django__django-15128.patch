@@ -1,0 +1,85 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index aaf35ee37c..6ff79f797a 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -599,26 +599,33 @@ class Query(BaseExpression):
+         # Now, add the joins from rhs query into the new query (skipping base
+         # table).
+         rhs_tables = list(rhs.alias_map)[1:]
+-        for alias in rhs_tables:
+-            join = rhs.alias_map[alias]
+-            # If the left side of the join was already relabeled, use the
+-            # updated alias.
+-            join = join.relabeled_clone(change_map)
+-            new_alias = self.join(join, reuse=reuse)
+-            if join.join_type == INNER:
+-                rhs_votes.add(new_alias)
+-            # We can't reuse the same join again in the query. If we have two
+-            # distinct joins for the same connection in rhs query, then the
+-            # combined query must have two joins, too.
+-            reuse.discard(new_alias)
+-            if alias != new_alias:
+-                change_map[alias] = new_alias
+-            if not rhs.alias_refcount[alias]:
+-                # The alias was unused in the rhs query. Unref it so that it
+-                # will be unused in the new query, too. We have to add and
+-                # unref the alias so that join promotion has information of
+-                # the join type for the unused alias.
+-                self.unref_alias(new_alias)
++        # Store RHS aliases to avoid conflicts during table_alias generation
++        self._combining_rhs_aliases = set(rhs_tables)
++        try:
++            for alias in rhs_tables:
++                join = rhs.alias_map[alias]
++                # If the left side of the join was already relabeled, use the
++                # updated alias.
++                join = join.relabeled_clone(change_map)
++                new_alias = self.join(join, reuse=reuse)
++                if join.join_type == INNER:
++                    rhs_votes.add(new_alias)
++                # We can't reuse the same join again in the query. If we have two
++                # distinct joins for the same connection in rhs query, then the
++                # combined query must have two joins, too.
++                reuse.discard(new_alias)
++                if alias != new_alias:
++                    change_map[alias] = new_alias
++                if not rhs.alias_refcount[alias]:
++                    # The alias was unused in the rhs query. Unref it so that it
++                    # will be unused in the new query, too. We have to add and
++                    # unref the alias so that join promotion has information of
++                    # the join type for the unused alias.
++                    self.unref_alias(new_alias)
++        finally:
++            # Clean up the temporary attribute
++            if hasattr(self, '_combining_rhs_aliases'):
++                delattr(self, '_combining_rhs_aliases')
+         joinpromoter.add_votes(rhs_votes)
+         joinpromoter.update_join_types(self)
+ 
+@@ -761,7 +768,15 @@ class Query(BaseExpression):
+ 
+         # Create a new alias for this table.
+         if alias_list:
+-            alias = '%s%d' % (self.alias_prefix, len(self.alias_map) + 1)
++            # Generate a unique alias by incrementing the suffix until no conflict exists
++            suffix = len(self.alias_map) + 1
++            alias = '%s%d' % (self.alias_prefix, suffix)
++            # During query combination, avoid creating aliases that would appear 
++            # as both key and value in change_map by checking _combining_rhs_aliases
++            rhs_aliases = getattr(self, '_combining_rhs_aliases', set())
++            while alias in self.alias_map or alias in rhs_aliases:
++                suffix += 1
++                alias = '%s%d' % (self.alias_prefix, suffix)
+             alias_list.append(alias)
+         else:
+             # The first occurrence of a table uses the table name directly.
+@@ -846,6 +861,9 @@ class Query(BaseExpression):
+         relabelling any references to them in select columns and the where
+         clause.
+         """
++        # Ensure that no alias appears as both a key and a value in the change_map.
++        # This prevents an alias from being renamed multiple times in sequence (e.g., T4→T5→T6),
++        # which would corrupt the query generation process.
+         assert set(change_map).isdisjoint(change_map.values())
+ 
+         # 1. Update references in "select" (normal columns plus aliases),

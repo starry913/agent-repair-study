@@ -1,0 +1,76 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 5d115458a1..05402f096d 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -95,12 +95,71 @@ def model_to_dict(instance, fields=None, exclude=None):
+     return data
+ 
+ 
++def _has_joins_in_filter(filter_obj):
++    """
++    Check if a limit_choices_to filter contains field lookups that could cause joins.
++    Returns True if joins are detected that could create duplicate rows.
++    """
++    from django.db.models import Q
++    
++    def _field_has_joins(field_name):
++        """
++        Check if a field lookup involves joins across relationships.
++        Field lookups like 'field__lookup' are not joins, but 'rel_field__attr' are.
++        """
++        if not isinstance(field_name, str) or '__' not in field_name:
++            return False
++        
++        # Common field lookups that don't create joins
++        lookup_suffixes = {
++            'exact', 'iexact', 'contains', 'icontains', 'in', 'gt', 'gte', 
++            'lt', 'lte', 'startswith', 'istartswith', 'endswith', 'iendswith',
++            'range', 'date', 'year', 'month', 'day', 'week_day', 'quarter',
++            'time', 'hour', 'minute', 'second', 'isnull', 'regex', 'iregex'
++        }
++        
++        parts = field_name.split('__')
++        if len(parts) >= 2:
++            # If the last part is a known lookup, check if there are more parts
++            # indicating a relationship traversal
++            last_part = parts[-1]
++            if last_part in lookup_suffixes:
++                # If there are more than 2 parts, it's a join (e.g., 'rel__field__lookup')
++                return len(parts) > 2
++            else:
++                # If the last part is not a lookup, it's likely a field access across relations
++                return True
++        
++        return False
++    
++    if isinstance(filter_obj, Q):
++        # Recursively check Q object children
++        for child in filter_obj.children:
++            if isinstance(child, Q):
++                if _has_joins_in_filter(child):
++                    return True
++            elif isinstance(child, tuple) and len(child) == 2:
++                field_name, _ = child
++                if _field_has_joins(field_name):
++                    return True
++    elif isinstance(filter_obj, dict):
++        # Check dictionary keys for field lookups that involve joins
++        for key in filter_obj.keys():
++            if _field_has_joins(key):
++                return True
++    
++    return False
++
++
+ def apply_limit_choices_to_to_formfield(formfield):
+     """Apply limit_choices_to to the formfield's queryset if needed."""
+     if hasattr(formfield, 'queryset') and hasattr(formfield, 'get_limit_choices_to'):
+         limit_choices_to = formfield.get_limit_choices_to()
+         if limit_choices_to is not None:
+             formfield.queryset = formfield.queryset.complex_filter(limit_choices_to)
++            # Apply distinct() if the filter contains joins that could create duplicates
++            if _has_joins_in_filter(limit_choices_to):
++                formfield.queryset = formfield.queryset.distinct()
+ 
+ 
+ def fields_for_model(model, fields=None, exclude=None, widgets=None,

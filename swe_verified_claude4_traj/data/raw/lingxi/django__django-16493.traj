@@ -1,0 +1,2323 @@
+<issue_description>
+Callable storage on FileField fails to deconstruct when it returns default_storage
+Description
+	
+If the storage argument on a FileField is set to a callable that returns default_storage, it is omitted from the deconstructed form of the field, rather than being included as a reference to the callable as expected.
+For example, given a model definition:
+from django.core.files.storage import FileSystemStorage, default_storage
+from django.db import models
+import random
+other_storage = FileSystemStorage(location='/media/other')
+def get_storage():
+	return random.choice([default_storage, other_storage])
+class MyModel(models.Model):
+	my_file = models.FileField(storage=get_storage)
+repeatedly running makemigrations will randomly generate a migration that alternately includes or omits storage=myapp.models.get_storage on the FileField definition.
+This case was overlooked in the fix for #31941 - the deconstruct method tests if self.storage is not default_storage to determine whether to add the storage kwarg, but at this point self.storage is the evaluated version, so it wrongly returns false for a callable that returns default_storage.
+</issue_description>
+
+<problem_decoder 0>
+## Step 1
+
+### 🤔 Thinking
+Looking at this issue, I need to first understand what's happening:
+
+
+1. The problem is about a FileField in Django that has a callable storage parameter
+
+2. When this callable returns `default_storage`, the deconstruct() method omits the storage parameter instead of including it as a reference to the callable
+
+3. This causes makemigrations to behave inconsistently - sometimes including the storage parameter, sometimes omitting it
+
+Let me start by exploring the repository structure to understand how this codebase is organized.
+
+### 👁️ Observation
+I'll help you analyze this issue step by step. Let me start by exploring the repository structure to understand the codebase.
+
+### 🎯 Action
+view_directory({'dir_path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+I can see this is a Django repository. Based on the issue description, I need to focus on the FileField's deconstruct method and the storage parameter handling. Let me look at the Django source code structure, specifically:
+
+
+1. django/db/models/fields/ - where the FileField is likely defined
+
+2. django/core/files/storage.py - where default_storage is defined
+
+3. django/db/migrations/ - where migration generation happens
+
+Let me start by examining the FileField implementation.
+
+### 👁️ Observation
+<observation>
+
+1. Found the Django repository structure with comprehensive Django source code
+
+2. Alternative action could have been to search for specific files or keywords first
+
+3. Next action: Focus on the FileField implementation and storage-related code
+</observation>
+
+Now let me look at the Django database models fields directory to understand the FileField implementation:
+
+### 🎯 Action
+view_directory({'dir_path': './django/db/models/fields'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I can see `files.py` which likely contains the FileField implementation. Let me examine this file to understand the current implementation of the FileField and its deconstruct method.
+
+### 👁️ Observation
+Let me examine the FileField implementation in the files.py module:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/files.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Now I can see the issue clearly! Let me examine the `deconstruct` method in the `FileField` class (lines 293-300). The problem is in line 298:
+
+
+
+```python
+if self.storage is not default_storage:
+    kwargs["storage"] = getattr(self, "_storage_callable", self.storage)
+
+
+```
+
+The issue is that `self.storage` is the evaluated result of the callable (if it was a callable), not the original callable itself. When a callable storage function returns `default_storage`, then `self.storage` will be equal to `default_storage`, and the condition `self.storage is not default_storage` will be False, causing the storage parameter to be omitted from the deconstructed form.
+
+Let me look at the initialization process (lines 240-244):
+
+
+```python
+self.storage = storage or default_storage
+if callable(self.storage):
+    # Hold a reference to the callable for deconstruct().
+    self._storage_callable = self.storage
+    self.storage = self.storage()
+
+
+```
+
+So the code does save the original callable in `self._storage_callable`, but the problem is in the deconstruct logic. It should check if there was an original callable, not if the evaluated storage is different from default_storage.
+
+Let me also check if there are any related tests to understand the expected behavior better.
+
+### 👁️ Observation
+<observation>
+
+1. Found the core issue in the FileField.deconstruct() method at line 298
+
+2. The problem is that the condition `self.storage is not default_storage` tests the evaluated storage, not the original callable
+
+3. The code correctly saves the original callable in `self._storage_callable` but doesn't use it properly in the deconstruct logic
+</observation>
+
+Now let me examine the related test files to understand the expected behavior:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests', 'keywords': ['field_deconstruction', 'FileField', 'deconstruct', 'storage.*callable']})
+
+
+## Step 5
+
+### 🤔 Thinking
+Great! I found references to storage and callable in the tests. Let me examine the field_deconstruction tests and the file_storage tests to understand the expected behavior better.
+
+### 👁️ Observation
+Let me examine the field deconstruction tests to understand the expected behavior:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/field_deconstruction/tests.py', 'view_range': [167, 175]})
+
+
+## Step 6
+
+### 🤔 Thinking
+This test doesn't specifically test the callable storage case. Let me examine the file_storage tests that were mentioned in the search results.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/file_storage/tests.py', 'view_range': [1008, 1019]})
+
+
+## Step 7
+
+### 🤔 Thinking
+Perfect! This test shows the expected behavior: "Deconstructing gives the original callable, not the evaluated value." Let me also look at the model definitions in the file_storage tests to understand the setup.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/file_storage/models.py', 'view_range': [59, 72]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Now I need to see what `callable_storage` is defined as:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/file_storage/models.py', 'view_range': [1, 30]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Now I understand the full picture. The test shows that the callable `callable_storage` (line 26-27) returns `temp_storage`, which is a different storage than `default_storage`. This callable returning a non-default storage works correctly.
+
+But the issue described in the problem statement is different: it's about a callable that returns `default_storage` specifically. Let me check if there's a fix for issue #31941 that was mentioned in the issue description.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './', 'keywords': ['31941', '_storage_callable']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me check the release notes for the previous fix to understand the context better.
+
+### 🎯 Action
+view_file_content({'file_name': 'docs/releases/3.1.2.txt', 'view_range': [1, 30]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Now I have a good understanding of the issue. Let me also check what the default_storage is to understand the context better.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/core/files/storage.py', 'view_range': [1, 50]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me search for the default_storage definition.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './django/core/files', 'keywords': ['default_storage']})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me look at the storage directory structure and the default_storage definition.
+
+### 🎯 Action
+view_directory({'dir_path': './django/core/files'})
+
+
+## Step 14
+
+### 🤔 Thinking
+Now let me look at the default_storage definition:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/core/files/storage/__init__.py'})
+
+
+## Step 15
+
+### 🤔 Thinking
+Perfect! Now I have a complete understanding of the issue. Let me consult the dev_knowledge to make sure I've covered all the aspects mentioned in the general root cause analysis steps.
+
+Looking at the dev_knowledge:
+
+
+1. ✅ Identify the component exhibiting unexpected behavior (FileField's deconstruct() method) - Done
+
+2. ✅ Analyze the serialization process during migration generation - Done
+
+3. ✅ Compare behavior with similar callable parameters in the system (e.g., upload_to) - Need to check
+
+4. ✅ Track the storage parameter's lifecycle from initialization to serialization - Done
+
+5. ✅ Verify the timing of callable evaluation - Done
+
+6. ✅ Check the persistence mechanism for field attributes - Done
+
+7. ✅ Review migration generation process and its requirements - Done
+
+8. ✅ Test behavior across different environments and configurations - Done
+
+I need to look at how upload_to is handled for comparison since it's also a callable parameter.
+
+### 👁️ Observation
+Let me check how the `upload_to` parameter is handled for comparison, since it's also a callable parameter:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/files.py', 'view_range': [293, 301]})
+
+
+## Step 16
+
+### 🤔 Thinking
+I notice that `upload_to` is always included in the deconstruct method (line 297), regardless of its value, while `storage` is only included if it's not default_storage. This makes sense because upload_to can be a callable or a string, and we want to preserve the original value.
+
+Now I also need to check if there are any tests that show the problematic behavior mentioned in the issue.
+
+### 👁️ Observation
+Let me create a test case to reproduce the issue and understand the exact problem:
+
+### 🎯 Action
+ask_repository_agent({'query': 'Can you show me any existing tests that demonstrate the issue with callable storage returning default_storage? I need to understand the exact behavior described in the issue where makemigrations alternately includes or omits the storage parameter.'})
+
+
+## Step 17
+
+### 🤔 Thinking
+I think I have enough information now to analyze the issue completely. Let me think about the development knowledge requirements:
+
+
+1. ✅ general_root_cause_analysis_steps - I've covered all the steps
+
+2. ✅ involved_components - I've identified the FileField, storage system, and migration generation
+
+3. ✅ relevant_architecture - I understand the Django field system, migration system, and storage backend system
+
+4. ✅ specific_involved_classes_functions_methods - I've identified the key classes and methods
+
+Let me now create a comprehensive issue analysis.
+
+### 👁️ Observation
+Now let me use the `think` function to analyze this issue comprehensively:
+
+### 🎯 Action
+think({'thought': 'Looking at the issue, I need to understand the complete flow:\n\n
+1. ISSUE ROOT CAUSE: The FileField.deconstruct() method at line 298 has a flawed condition:\n   ```python\n   if self.storage is not default_storage:\n       kwargs["storage"] = getattr(self, "_storage_callable", self.storage)\n   ```\n   \n   When a callable storage returns default_storage, self.storage becomes equal to default_storage, so the condition is False, and the storage parameter is omitted from the deconstructed form.\n\n
+2. EXPECTED BEHAVIOR: The deconstruct method should always include the storage parameter when it was originally a callable, regardless of what the callable returns.\n\n
+3. COMPARISON WITH UPLOAD_TO: The upload_to parameter is always included in deconstruct (line 297), regardless of its value. This is the correct approach.\n\n
+4. PROPER LOGIC: The condition should check if there was an original callable (i.e., if self._storage_callable exists), not whether the evaluated storage differs from default_storage.\n\n
+5. IMPACT: This causes makemigrations to behave inconsistently - sometimes including storage=callable, sometimes omitting it, depending on what the callable returns at the time of migration generation.\n\nThe fix should be to change the condition from checking the evaluated storage to checking if there was an original callable.'})
+
+
+## Step 18
+
+### 🤔 Thinking
+Now I have a complete understanding of the issue. Let me provide the final issue analysis with all the required details.
+
+### 📋 Conclusion
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "FileField's deconstruct() method incorrectly omits the storage parameter when a callable storage function returns default_storage, causing makemigrations to behave inconsistently by alternately including or omitting the storage parameter based on the callable's return value at migration generation time."
+    - status: "yes (the issue exists in the current codebase)"
+  </problem_statement>
+  <root_cause>
+    The root cause is in the `FileField.deconstruct()` method in `django/db/models/fields/files.py` at line 
+298. The condition `if self.storage is not default_storage:` tests the evaluated storage result rather than checking whether the original storage parameter was a callable. When a callable storage function returns `default_storage`, the condition evaluates to `False`, causing the storage parameter to be omitted from the deconstructed form. This happens because during initialization (lines 240-244), callable storages are evaluated and the result is stored in `self.storage`, while the original callable is preserved in `self._storage_callable`. The deconstruct logic should check for the presence of the original callable, not compare the evaluated result with default_storage.
+  </root_cause>
+  <current_behavior>
+    The current implementation in `django/db/models/fields/files.py`:
+    - **FileField.__init__()** (lines 240-244): Correctly evaluates callable storage and stores the original callable in `self._storage_callable`
+    - **FileField.deconstruct()** (lines 293-300): Uses flawed logic `if self.storage is not default_storage:` at line 298 that tests the evaluated storage instead of checking if there was an original callable
+    - **Result**: When a callable storage returns `default_storage`, the storage parameter is omitted from migrations, causing inconsistent behavior where makemigrations alternately includes or omits the storage parameter
+    - **Comparison**: The `upload_to` parameter is always included in deconstruct (line 297) regardless of its value, which is the correct approach for callable parameters
+  </current_behavior>
+  <expected_behavior>
+    The corrected implementation should:
+    - **FileField.deconstruct()** method should check for the existence of `self._storage_callable` instead of comparing `self.storage` with `default_storage`
+    - **Modified condition**: Change `if self.storage is not default_storage:` to `if hasattr(self, '_storage_callable'):` or similar logic that tests for the presence of the original callable
+    - **Result**: The storage parameter should always be included in the deconstructed form when it was originally a callable, regardless of what the callable returns
+    - **Consistency**: This approach aligns with how other callable parameters like `upload_to` are handled and ensures that migration generation is deterministic and preserves the original field definition
+    - **Behavioral improvement**: makemigrations will consistently include the storage parameter when it was originally a callable, eliminating the random inclusion/omission behavior
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 0>
+
+<problem_decoder 1>
+## Step 1
+
+### 🤔 Thinking
+Let me start by understanding the issue described in the issue_description. The user is reporting a problem with Django's FileField where:
+
+
+1. When a FileField's storage argument is set to a callable that returns `default_storage`, it's omitted from the deconstructed form of the field
+
+2. This causes makemigrations to randomly generate migrations that alternately include or omit the storage parameter
+
+3. This was overlooked in a fix for issue #31941
+
+4. The problem is that the `deconstruct` method tests if `self.storage is not default_storage` to determine whether to add the storage kwarg, but at this point `self.storage` is the evaluated version, so it wrongly returns false for a callable that returns `default_storage`
+
+Let me first explore the repository structure to understand the codebase.
+
+### 👁️ Observation
+I'll help you analyze this issue. Let me start by exploring the repository structure to understand the codebase and then identify the problem.
+
+### 🎯 Action
+view_directory({'dir_path': './', 'depth': 2})
+
+
+## Step 2
+
+### 🤔 Thinking
+Now I can see this is a Django codebase. Let me look at the specific areas mentioned in the issue:
+
+
+1. FileField implementation - likely in `django/db/models/fields/files.py`
+
+2. Storage handling - likely in `django/core/files/storage.py`
+
+3. The deconstruct method that is mentioned in the issue
+
+Let me start by examining the FileField implementation and the storage system.
+
+### 👁️ Observation
+<observation>
+
+1. This is a Django codebase with the expected directory structure
+
+2. The issue is related to FileField storage handling, so I need to look at:
+   - `django/db/models/fields/files.py` for FileField implementation
+   - `django/core/files/storage.py` for storage system
+   - The deconstruct method mentioned in the issue
+
+3. Next action: Examine the FileField implementation and storage system
+</observation>
+
+Let me first look at the FileField implementation:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/files.py'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Now I can see the issue! Let me look at the `deconstruct` method of `FileField` (lines 293-300). The key part is this:
+
+
+
+```python
+def deconstruct(self):
+    name, path, args, kwargs = super().deconstruct()
+    if kwargs.get("max_length") == 100:
+        del kwargs["max_length"]
+    kwargs["upload_to"] = self.upload_to
+    if self.storage is not default_storage:
+        kwargs["storage"] = getattr(self, "_storage_callable", self.storage)
+    return name, path, args, kwargs
+
+
+```
+
+The problem is on line 298: `if self.storage is not default_storage:`. 
+
+Looking at the `__init__` method (lines 235-258), I can see that:
+
+1. If `storage` is callable, it stores the original callable in `self._storage_callable` (line 243)
+
+2. Then it evaluates the callable by calling `self.storage = self.storage()` (line 244)
+
+So by the time `deconstruct` is called, `self.storage` is the evaluated result, not the original callable. If the callable returns `default_storage`, then `self.storage is default_storage` will be `True`, and the storage parameter will be omitted from the deconstructed kwargs.
+
+This means when `get_storage()` returns `default_storage`, the condition `self.storage is not default_storage` evaluates to `False`, so the storage parameter is not included in the migration.
+
+Let me look at the storage module to understand `default_storage`:
+
+### 👁️ Observation
+<observation>
+
+1. Found the issue! In the `deconstruct` method of `FileField` (line 298), the condition `if self.storage is not default_storage:` is checking the evaluated storage, not the original callable.
+
+2. The `__init__` method correctly stores the callable in `self._storage_callable` when storage is callable, but then evaluates it to `self.storage = self.storage()`.
+
+3. When the callable returns `default_storage`, `self.storage is default_storage` evaluates to `True`, so storage is omitted from deconstruct kwargs.
+
+4. Next action: Look at the storage module to understand `default_storage` better and find related issue #31941 mentioned in the problem description.
+</observation>
+
+Let me look at the storage module to understand `default_storage`:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/core/files/storage.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Let me check the directory structure to find the storage module:
+
+### 🎯 Action
+view_directory({'dir_path': 'django/core/files/'})
+
+
+## Step 5
+
+### 🤔 Thinking
+I see there's a `storage` directory. Let me check the storage module:
+
+### 🎯 Action
+view_file_content({'file_name': 'django/core/files/storage/__init__.py'})
+
+
+## Step 6
+
+### 🤔 Thinking
+Now I can see that `default_storage` is an instance of `DefaultStorage`, which is a `LazyObject`. Let me search for the issue #31941 mentioned in the problem description to understand what was fixed previously.
+
+### 👁️ Observation
+<observation>
+
+1. Found that `default_storage` is an instance of `DefaultStorage` (line 42), which extends `LazyObject` (line 36).
+
+2. The `DefaultStorage` class lazy-loads the actual storage from `storages[DEFAULT_STORAGE_ALIAS]` (line 38).
+
+3. The issue mentions that this was overlooked in the fix for #31941, so I need to understand what was previously fixed.
+
+4. Next action: Search for references to issue #31941 or related changes in the codebase.
+</observation>
+
+Let me search for references to issue #31941 or related changes:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './', 'keywords': ['31941', '_storage_callable', 'deconstruct.*storage']})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me look at the release notes to understand what was fixed in #31941:
+
+### 🎯 Action
+view_file_content({'file_name': 'docs/releases/3.1.2.txt'})
+
+
+## Step 8
+
+### 🤔 Thinking
+Now I can see that issue #31941 was about fixing FileField instances with callable storage not being correctly deconstructed. The fix they made was to add the `_storage_callable` attribute to store the original callable for use in `deconstruct()`.
+
+However, the current issue is that the condition in `deconstruct()` still uses `self.storage` (the evaluated result) instead of checking if `_storage_callable` exists. This means that when the callable returns `default_storage`, it's incorrectly omitted from the deconstruct.
+
+Let me search for tests related to this functionality to understand the expected behavior:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './', 'keywords': ['test.*storage.*callable', 'test.*deconstruct.*storage', 'FileField.*storage.*test']})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me look at the relevant test files to understand how FileField storage is tested:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/', 'keywords': ['field_deconstruction', 'deconstruct']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me look at the field deconstruction tests to understand the expected behavior:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/field_deconstruction/tests.py'})
+
+
+## Step 11
+
+### 🤔 Thinking
+I noticed that the test for FileField doesn't test the storage parameter at all. Let me look at the file_storage tests to see if there are any tests for callable storage:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'tests/file_storage/', 'keywords': ['callable', 'storage', 'deconstruct']})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me look at the file_storage tests to understand what tests already exist for callable storage:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/file_storage/tests.py', 'view_range': [95, 120]})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me search for tests specifically about callable storage in FileField:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'tests/file_storage/', 'keywords': ['callable.*storage', 'FileField.*storage']})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me look at the models and tests for callable storage:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/file_storage/models.py', 'view_range': [26, 70]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Now let me look at the tests for callable storage:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/file_storage/tests.py', 'view_range': [970, 1020]})
+
+
+## Step 16
+
+### 🤔 Thinking
+Perfect! I can see there's already a test for deconstruction that checks that the original callable is preserved (lines 1012-1019). The test uses `callable_storage` function defined at line 26 which returns `temp_storage`. 
+
+Now let me look at the specific issue - if the callable returns `default_storage`, the deconstruct method won't include it. Let me check what `temp_storage` is:
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/file_storage/models.py', 'view_range': [1, 25]})
+
+
+## Step 17
+
+### 🤔 Thinking
+So `temp_storage` is a custom FileSystemStorage instance, not the default storage. This means the existing test doesn't cover the issue described.
+
+Let me now write a comprehensive issue analysis based on what I've found:
+
+
+1. **Problem**: When a FileField's storage is a callable that returns `default_storage`, the deconstruct method incorrectly omits the storage parameter from the migration.
+
+
+2. **Root Cause**: In the `deconstruct` method of `FileField`, line 298 checks `if self.storage is not default_storage:`. However, `self.storage` is the evaluated result of the callable, not the original callable. When the callable returns `default_storage`, this condition evaluates to `False`, so the storage parameter is omitted.
+
+
+3. **Current Behavior**: The deconstruct method stores the original callable in `self._storage_callable` when storage is callable, but still uses the evaluated `self.storage` for the comparison.
+
+
+4. **Expected Behavior**: If the original storage was a callable, it should always be included in the deconstruct output regardless of what it returns, so that the callable behavior is preserved in migrations.
+
+Let me also check the current logic for consistency:
+
+### 🎯 Action
+ask_repository_agent({'query': 'What does the development knowledge about this issue tell us about the expected behavior and the root cause analysis steps I should follow?'})
+
+
+## Step 18
+
+### 🤔 Thinking
+Now let me check the development knowledge for this specific issue about callable storage and `default_storage`:
+
+### 🎯 Action
+ask_repository_agent({'query': 'What can you tell me about the specific issue with FileField callable storage and default_storage mentioned in the issue description? Are there any similar issues or patterns in the codebase?'})
+
+
+## Step 19
+
+### 🤔 Thinking
+Now I have a much clearer picture of the issue. Let me create a comprehensive issue analysis:
+
+
+1. **Problem Statement**: The issue is that when a FileField's storage is set to a callable that returns `default_storage`, the deconstruct method incorrectly omits the storage parameter from migrations. This happens because the deconstruct method tests `if self.storage is not default_storage:`, but `self.storage` is the evaluated result of the callable.
+
+
+2. **Root Cause**: The deconstruct method stores the original callable in `self._storage_callable` when storage is callable, but still uses the evaluated `self.storage` for the comparison with `default_storage`. When the callable returns `default_storage`, this condition evaluates to `False`, so the storage parameter is omitted.
+
+
+3. **Current Behavior**: The field stores the callable correctly in `_storage_callable`, but the deconstruct logic incorrectly uses the evaluated storage for the comparison.
+
+
+4. **Expected Behavior**: If the original storage was a callable, it should always be included in the deconstruct output regardless of what it returns, so that the callable behavior is preserved in migrations.
+
+Let me provide my final analysis now.
+
+### 📋 Conclusion
+<observation>
+
+1. Found the root cause: In `FileField.deconstruct()` method (line 298), the condition `if self.storage is not default_storage:` checks the evaluated storage result instead of detecting if the original storage was a callable.
+
+2. The existing test for callable storage deconstruction only tests callables that return non-default storage, missing the edge case where the callable returns `default_storage`.
+
+3. The issue was partially fixed in #31941 by adding `_storage_callable` to store the original callable, but the deconstruct logic still uses the wrong condition.
+
+4. Next action: Now I have enough information to provide a comprehensive issue analysis based on the READING and EXPLORATION phases.
+</observation>
+
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "When a FileField's storage argument is set to a callable that returns default_storage, the deconstruct method incorrectly omits the storage parameter from migrations instead of including it as a reference to the callable. This causes makemigrations to randomly generate migrations that alternately include or omit the storage parameter, depending on whether the callable returns default_storage or another storage instance."
+    - status: "yes"
+  </problem_statement>
+  <root_cause>
+    - The root cause is in the `deconstruct` method of `FileField` class in `django/db/models/fields/files.py` at line 
+298. The condition `if self.storage is not default_storage:` uses the evaluated storage result (`self.storage`) instead of checking if the original storage was a callable. When a callable returns `default_storage`, the condition evaluates to `False`, causing the storage parameter to be omitted from the deconstructed field definition. This was an oversight in the fix for issue #31941, which correctly added `_storage_callable` to store the original callable but didn't update the deconstruct logic to use it appropriately.
+  </root_cause>
+  <current_behavior>
+    - **File**: `django/db/models/fields/files.py`
+    - **Method**: `FileField.deconstruct()` (lines 293-300)
+    - **Current Implementation**: The method checks `if self.storage is not default_storage:` to determine whether to include the storage parameter in kwargs. However, `self.storage` is the evaluated result of the callable (set in `__init__` at line 244), not the original callable.
+    - **Storage of Original Callable**: The `__init__` method correctly stores the original callable in `self._storage_callable` when storage is callable (line 243), but this information is not properly used in the deconstruct logic.
+    - **Existing Test Coverage**: Tests exist for callable storage deconstruction (`tests/file_storage/tests.py:1012-1019`), but they only test callables that return non-default storage instances, missing the edge case where the callable returns `default_storage`.
+    - **Edge Case**: When a callable returns `default_storage`, the comparison `self.storage is not default_storage` evaluates to `False`, causing the storage parameter to be omitted from migrations.
+  </current_behavior>
+  <expected_behavior>
+    - **File**: `django/db/models/fields/files.py`
+    - **Method**: `FileField.deconstruct()` should be modified to check if the original storage was a callable, rather than comparing the evaluated storage with `default_storage`.
+    - **Logic Change**: The condition should be changed to check if `hasattr(self, '_storage_callable')` to determine if the original storage was a callable, and if so, always include the storage parameter in the kwargs.
+    - **Behavioral Improvement**: When the original storage was a callable, the deconstruct method should always include `kwargs["storage"] = self._storage_callable` regardless of what the callable returns, preserving the callable behavior in migrations.
+    - **Test Coverage**: Add a test case for a callable that returns `default_storage` to ensure it's properly included in the deconstructed field definition.
+    - **Migration Consistency**: This fix will ensure that makemigrations produces consistent results regardless of whether the callable returns `default_storage` or another storage instance.
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 1>
+
+<problem_decoder 2>
+## Step 1
+
+### 🤔 Thinking
+Let me analyze this issue step by step. The issue is about a bug in Django's FileField when storage is set to a callable that returns default_storage. Let me break down the problem:
+
+
+1. The issue is that when a FileField has storage set to a callable that returns default_storage, the deconstruct method (used for migrations) incorrectly omits the storage parameter from the deconstructed form
+
+2. This causes migrations to be generated inconsistently - sometimes with storage=callable and sometimes without it
+
+3. The problem is in the deconstruct method where it checks `self.storage is not default_storage` but at this point self.storage is the evaluated version (the result of calling the callable), not the original callable
+
+I need to:
+
+1. First explore the repository structure to understand the codebase
+
+2. Find the FileField implementation and its deconstruct method
+
+3. Understand how the storage parameter is handled
+
+4. Trace the issue with callable storage and default_storage comparison
+
+5. Identify the root cause and expected behavior
+
+Let me start by exploring the repository.
+
+### 👁️ Observation
+I'll help you analyze this issue. Let me start by exploring the repository structure to understand the codebase and then dive into the specific problem.
+
+### 🎯 Action
+view_directory({'dir_path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+I can see this is a Django repository. The issue is about FileField and its deconstruct method. Let me explore the relevant directories to understand the structure better, particularly focusing on the Django core and models sections.
+
+### 👁️ Observation
+<observation>
+
+1. Found the Django repository with typical structure including django/, tests/, and documentation
+
+2. Alternative action could have been to search for FileField directly first 
+
+3. Next action: Look into the django/db/models directory where FileField is likely implemented
+</observation>
+
+### 🎯 Action
+view_directory({'dir_path': './django/db/models'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I can see the `django/db/models/fields/files.py` file which likely contains the FileField implementation. Let me examine this file to understand the current FileField implementation.
+
+### 👁️ Observation
+<observation>
+
+1. Found the django/db/models/fields directory structure with files.py which likely contains FileField
+
+2. Alternative action could have been to search for "FileField" directly in the codebase
+
+3. Next action: Examine the files.py file to understand the FileField implementation
+</observation>
+
+### 🎯 Action
+view_file_content({'file_name': 'django/db/models/fields/files.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Perfect! I found the issue. Let me analyze the relevant parts of the code:
+
+
+1. Looking at the `__init__` method of FileField (lines 235-257):
+   - It sets `self.storage = storage or default_storage`
+   - If `callable(self.storage)` is true, it:
+     - Stores the callable in `self._storage_callable`
+     - Calls the callable: `self.storage = self.storage()`
+     - Validates the result
+
+
+2. Looking at the `deconstruct` method (lines 293-300):
+   - It checks `if self.storage is not default_storage`
+   - If true, it adds `kwargs["storage"] = getattr(self, "_storage_callable", self.storage)`
+
+The issue is exactly as described in the problem statement. When a callable returns `default_storage`, at the time of deconstruct, `self.storage` is already the evaluated result (default_storage), so the check `self.storage is not default_storage` evaluates to `False`, causing the storage kwarg to be omitted.
+
+Let me also check what `default_storage` is to understand the context better.
+
+### 👁️ Observation
+<observation>
+
+1. Found the FileField implementation in django/db/models/fields/files.py
+
+2. Alternative action could have been to look at the import statement for default_storage first
+
+3. Next action: Examine the deconstruct method closely and understand the bug, then check what default_storage is
+</observation>
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'django/core/files/storage', 'keywords': ['default_storage']})
+
+
+## Step 5
+
+### 🤔 Thinking
+Let me look at the default_storage definition to understand what it is.
+
+### 🎯 Action
+view_file_content({'file_name': 'django/core/files/storage/__init__.py'})
+
+
+## Step 6
+
+### 🤔 Thinking
+Perfect! Now I understand the complete picture. `default_storage` is a LazyObject that lazily loads the default storage. This is important context for understanding the issue.
+
+Now let me also check if there are any tests related to this issue to understand the expected behavior better.
+
+### 👁️ Observation
+<observation>
+
+1. Found that default_storage is a LazyObject instance that lazily loads the default storage
+
+2. Alternative action could have been to search for existing tests about FileField deconstruction
+
+3. Next action: Look for tests related to FileField deconstruction and callable storage
+</observation>
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'tests/', 'keywords': ['FileField.*deconstruct', 'storage.*callable']})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me examine the tests related to callable storage to understand the expected behavior better.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/file_storage/tests.py', 'view_range': [1005, 1025]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Great! This is very helpful. There's a test that verifies that deconstruction gives the original callable, not the evaluated value. Let me look at the model definition to understand what `callable_storage` is.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/file_storage/models.py', 'view_range': [55, 70]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Now I need to see what `callable_storage` is defined as in that file to understand the test better.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'tests/file_storage/models.py', 'keywords': ['callable_storage']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me look at the entire models.py file to understand the callable_storage definition.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/file_storage/models.py', 'view_range': [1, 50]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Perfect! I found the `callable_storage` function defined on line 26-
+27. It returns `temp_storage` (which is a FileSystemStorage instance). This confirms that the existing test is checking that a callable storage that returns a specific FileSystemStorage instance is properly deconstructed.
+
+Now let me also check if there are any tests specifically for the issue mentioned in the problem statement - a callable that returns `default_storage`.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'tests/', 'keywords': ['default_storage.*callable', 'makemigrations.*FileField']})
+
+
+## Step 12
+
+### 🤔 Thinking
+It seems there are no existing tests for the specific issue mentioned in the problem statement. Let me also check if there are any field deconstruction tests in general.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'tests/', 'keywords': ['field_deconstruction']})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me examine this test file to see if there are already tests for FileField deconstruction.
+
+### 🎯 Action
+view_file_content({'file_name': 'tests/field_deconstruction/tests.py', 'view_range': [550, 570]})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me search for FileField deconstruction tests specifically.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'tests/field_deconstruction/tests.py', 'keywords': ['FileField']})
+
+
+## Step 15
+
+### 🤔 Thinking
+Let me look at the issue number mentioned in the problem statement to understand the context better.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './', 'keywords': ['31941']})
+
+
+## Step 16
+
+### 🤔 Thinking
+Let me check the release notes to understand the context of issue #31941.
+
+### 🎯 Action
+view_file_content({'file_name': './docs/releases/3.1.2.txt', 'view_range': [10, 20]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Perfect! Now I understand the context. Issue #31941 was about FileField instances with callable storage not being correctly deconstructed. This issue (the one we're analyzing) is about a specific edge case that wasn't covered in the original fix - when the callable returns `default_storage`.
+
+Now let me verify I understand the complete issue by looking at the code more carefully. The issue is in the `deconstruct` method of FileField on line 298-299:
+
+
+
+```python
+if self.storage is not default_storage:
+    kwargs["storage"] = getattr(self, "_storage_callable", self.storage)
+
+
+```
+
+The problem is that when the callable returns `default_storage`, `self.storage` is already the evaluated version (which is `default_storage`), so the check `self.storage is not default_storage` becomes `default_storage is not default_storage` which is False, so the storage kwarg is not added.
+
+But the expected behavior is that if there was a callable provided originally, it should be included in the deconstruction regardless of what it returns.
+
+Let me also check if there are any other related issues or behaviors to understand this better.
+
+### 🎯 Action
+ask_repository_agent({'query': 'What was the original problem in issue #31941 with FileField callable storage deconstruction, and how was it fixed?'})
+
+
+## Step 18
+
+### 🤔 Thinking
+Great! Now I have a complete understanding of the issue. The repository agent's response confirms my analysis:
+
+
+1. The original fix in #31941 correctly handles saving the callable in `_storage_callable` and using it in deconstruct
+
+2. However, the deconstruct method still has a bug: it only includes the storage kwarg when `self.storage is not default_storage`
+
+3. When the callable returns `default_storage`, `self.storage` becomes `default_storage`, so the check fails and the storage kwarg is omitted
+
+4. This causes migrations to be generated inconsistently
+
+Now I have all the information I need to provide a comprehensive analysis of the issue.
+
+### 🎯 Action
+think({'thought': "Now I have a complete understanding of the issue. Let me analyze it:\n\n
+1. **Problem**: When a FileField has a callable storage that returns default_storage, the deconstruct method incorrectly omits the storage parameter, causing inconsistent migrations.\n\n
+2. **Root Cause**: In the deconstruct method (line 298-299), the check `if self.storage is not default_storage:` fails when the callable returns default_storage, because at that point `self.storage` is already the evaluated result (default_storage).\n\n
+3. **Context**: This is an edge case missed in the original fix for issue #
+31941. The original fix correctly stores the callable in `_storage_callable` and uses it when needed, but the condition for when to include it is wrong.\n\n
+4. **Expected behavior**: If there was originally a callable provided for storage, it should always be included in the deconstruction, regardless of what it returns.\n\n
+5. **Current behavior**: The storage kwarg is only included when `self.storage is not default_storage`, which fails when the callable returns default_storage.\n\n
+6. **Solution**: The condition should check if there's a callable (i.e., if `_storage_callable` exists) OR if the storage is not default_storage.\n\nLet me now provide the complete analysis."})
+
+
+## Step 19
+
+### 🤔 Thinking
+Now I need to provide a comprehensive issue analysis based on all the information I've gathered.
+
+### 📋 Conclusion
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "When a FileField has a callable storage parameter that returns default_storage, the field's deconstruct method incorrectly omits the storage parameter from the deconstructed form, causing makemigrations to generate inconsistent migrations that alternately include or omit the storage parameter."
+    - status: "yes - the issue exists in the current codebase"
+  </problem_statement>
+  <root_cause>
+    - The root cause is in the `deconstruct()` method of the `FileField` class in `django/db/models/fields/files.py` at lines 298-
+299. The method checks `if self.storage is not default_storage:` to determine whether to include the storage kwarg. However, when a callable storage returns `default_storage`, `self.storage` becomes the evaluated result (`default_storage`), so the condition `default_storage is not default_storage` evaluates to `False`, causing the storage parameter to be omitted. This logic fails to consider that the original storage was a callable and should be preserved in the deconstruction regardless of its return value.
+  </root_cause>
+  <current_behavior>
+    - The current `FileField.__init__` method (lines 240-244) correctly handles callable storage by storing the original callable in `self._storage_callable` before evaluating it
+    - The `deconstruct()` method (lines 293-300) includes the storage kwarg only when `self.storage is not default_storage`, using `getattr(self, "_storage_callable", self.storage)` to prefer the original callable if it exists
+    - When a callable returns `default_storage`, the condition fails because `self.storage` is already the evaluated `default_storage`, so the storage kwarg is omitted from the kwargs
+    - This causes `makemigrations` to generate different migration files on subsequent runs - sometimes including `storage=callable_function` and sometimes omitting it entirely
+    - The issue affects both `FileField` and `ImageField` since `ImageField` inherits from `FileField`
+  </current_behavior>
+  <expected_behavior>
+    - The `deconstruct()` method should include the storage kwarg whenever there was originally a callable provided for storage, regardless of what that callable returns
+    - When a `FileField` is initialized with a callable storage that returns `default_storage`, the deconstruction should consistently include `storage=original_callable` in the kwargs
+    - The deconstruction should preserve the original callable to maintain the dynamic behavior intended by the developer
+    - Migrations should be generated consistently, avoiding unnecessary migration files on subsequent `makemigrations` runs
+    - The fix should modify the condition in the `deconstruct()` method to check for the existence of `_storage_callable` in addition to the current `self.storage is not default_storage` check
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 2>
+
+<solution_mapper 0>
+## Step 1
+
+### 🤔 Thinking
+The user is asking me to act as the Solution Mapper assistant and help map a solution to the problem. Based on the issue analysis, I need to:
+
+
+1. EXPLORATION: Find relevant files and understand the problem
+
+2. REPRODUCTION: Create a script to reproduce the issue
+
+3. FIX ANALYSIS: Develop a solution based on the principles provided
+
+Let me start with exploration to understand the repository structure and find the relevant files.
+
+### 👁️ Observation
+I'll help you map a solution to this problem. Let me start by exploring the repository structure and understanding the issue better.
+
+## 
+1. EXPLORATION
+
+Let me first explore the repository structure and locate the relevant files.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Now I need to find the FileField implementation mentioned in the issue. Based on the issue description, it's in `django/db/models/fields/files.py`.
+
+### 👁️ Observation
+Let me look at the FileField implementation mentioned in the issue analysis:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/fields/files.py'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I found the issue. Looking at the `FileField` class, I can see:
+
+
+1. In `__init__` method (lines 240-244), when storage is callable, it stores the original callable in `self._storage_callable` and then evaluates it.
+
+2. In the `deconstruct` method (lines 293-300), specifically on line 298, it checks `if self.storage is not default_storage:` and then on line 299 it uses `getattr(self, "_storage_callable", self.storage)`.
+
+The issue is that when the callable returns `default_storage`, the condition `self.storage is not default_storage` evaluates to `False`, so the storage parameter is omitted from the deconstructed form.
+
+This matches exactly what the issue description and analysis stated. Now let me look at the existing tests to understand the test structure.
+
+### 👁️ Observation
+<observation>
+
+1. Found the exact location of the bug: Line 298 in `FileField.deconstruct()` method uses `self.storage is not default_storage` which tests the evaluated result instead of checking for the original callable.
+
+2. Alternative action could have been to search for existing tests to understand the test structure first.
+
+3. Next action: Look at existing tests to understand how they test FileField deconstruction, especially for callable storage.
+</observation>
+
+Let me look at the existing test structure for FileField to understand the testing patterns:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests', 'keywords': ['file_storage', 'FileField', 'deconstruct', 'callable.*storage']})
+
+
+## Step 4
+
+### 🤔 Thinking
+Great! I found the file storage tests. Let me look at the specific test files that deal with callable storage:
+
+### 👁️ Observation
+Let me look at the file storage tests to understand how callable storage is tested:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/file_storage/tests.py', 'view_range': [1, 100]})
+
+
+## Step 5
+
+### 🤔 Thinking
+Let me find the specific tests for callable storage deconstruction:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/file_storage/tests.py', 'keywords': ['callable_storage', 'deconstruct', 'storage.*callable']})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me search more specifically for tests that handle callable storage:
+
+### 🎯 Action
+bash({'command': 'grep -n "callable_storage\\|storage.*callable\\|deconstruct" ./tests/file_storage/tests.py | head -20'})
+
+
+## Step 7
+
+### 🤔 Thinking
+Now let me look at the specific test for callable storage deconstruction:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/file_storage/tests.py', 'view_range': [1012, 1025]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Perfect! I found the existing test for callable storage deconstruction. Now let me look at the models file to understand the test setup:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/file_storage/models.py'})
+
+
+## Step 9
+
+### 🤔 Thinking
+Perfect! Now I understand the test setup. The `callable_storage` function returns `temp_storage`, which is NOT the default storage. This is why the existing test passes - it's not testing the specific edge case where a callable returns `default_storage`.
+
+Now let me check what `default_storage` is:
+
+### 🎯 Action
+ask_repository_agent({'query': 'What is `default_storage` in Django? How is it defined and what does it typically point to?'})
+
+
+## Step 10
+
+### 🤔 Thinking
+Now I understand the issue better. Let me check what happens when `default_storage` is evaluated:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/core/files/storage.py', 'view_range': [1, 50]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Let me search for the storage.py file:
+
+### 🎯 Action
+bash({'command': 'find . -name "storage.py" | head -10'})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me search for storage files more specifically:
+
+### 🎯 Action
+bash({'command': 'find ./django -name "*storage*" -type f | head -10'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me look for the storage module in the files system:
+
+### 🎯 Action
+bash({'command': 'find ./django/core/files -name "*.py" | head -10'})
+
+
+## Step 14
+
+### 🤔 Thinking
+Ah, the storage module is in a directory structure. Let me check the __init__.py file where default_storage is likely defined:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/core/files/storage/__init__.py'})
+
+
+## Step 15
+
+### 🤔 Thinking
+Perfect! Now I can see that `default_storage` is a `LazyObject` instance. This matches what the repository agent said. Now I'm ready to create the reproduction script.
+
+Let me create a reproduction script that demonstrates the issue:
+
+### 👁️ Observation
+## 
+2. REPRODUCTION
+
+Now let me create a reproduction script to demonstrate the issue:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './reproduction.py', 'file_text': '#!/usr/bin/env python\n"""\nReproduction script for the FileField callable storage deconstruction issue.\n\nThis script demonstrates the bug where callable storage that returns default_storage\nis incorrectly omitted from the deconstructed form.\n"""\n\nimport os\nimport sys\nimport random\nfrom pathlib import Path\n\n# Add the current directory to Python path\nsys.path.insert(0, \'.\')\n\n# Setup Django\nos.environ.setdefault(\'DJANGO_SETTINGS_MODULE\', \'tests.settings\')\n\nimport django\ndjango.setup()\n\nfrom django.core.files.storage import FileSystemStorage, default_storage\nfrom django.db import models\n\n# Create a storage instance that\'s not default_storage\nother_storage = FileSystemStorage(location=\'/tmp/other\')\n\ndef get_storage_returns_default():\n    """Callable that returns default_storage"""\n    return default_storage\n\ndef get_storage_returns_other():\n    """Callable that returns other_storage"""\n    return other_storage\n\ndef get_storage_random():\n    """Callable that randomly returns default_storage or other_storage"""\n    return random.choice([default_storage, other_storage])\n\n# Create test models\nclass TestModel(models.Model):\n    # This should always include storage in deconstruct since it\'s a callable\n    field_callable_returns_default = models.FileField(storage=get_storage_returns_default)\n    \n    # This should always include storage in deconstruct since it\'s a callable\n    field_callable_returns_other = models.FileField(storage=get_storage_returns_other)\n    \n    # This should always include storage in deconstruct since it\'s a callable\n    field_callable_random = models.FileField(storage=get_storage_random)\n    \n    # This should NOT include storage in deconstruct since it\'s not a callable\n    # and equals default_storage\n    field_direct_default = models.FileField(storage=default_storage)\n    \n    # This should include storage in deconstruct since it\'s not default_storage\n    field_direct_other = models.FileField(storage=other_storage)\n    \n    class Meta:\n        app_label = \'test_app\'\n\ndef test_deconstruct_behavior():\n    """Test the deconstruct behavior of different storage configurations"""\n    \n    print("=== FileField Storage Deconstruction Test ===\\n")\n    \n    # Test field with callable that returns default_storage\n    field = TestModel._meta.get_field(\'field_callable_returns_default\')\n    name, path, args, kwargs = field.deconstruct()\n    print(f"field_callable_returns_default:")\n    print(f"  Storage in kwargs: {\'storage\' in kwargs}")\n    if \'storage\' in kwargs:\n        print(f"  Storage value: {kwargs[\'storage\']}")\n        print(f"  Storage is callable: {callable(kwargs[\'storage\'])}")\n    print(f"  Expected: storage should be in kwargs (callable)")\n    print()\n    \n    # Test field with callable that returns other_storage  \n    field = TestModel._meta.get_field(\'field_callable_returns_other\')\n    name, path, args, kwargs = field.deconstruct()\n    print(f"field_callable_returns_other:")\n    print(f"  Storage in kwargs: {\'storage\' in kwargs}")\n    if \'storage\' in kwargs:\n        print(f"  Storage value: {kwargs[\'storage\']}")\n        print(f"  Storage is callable: {callable(kwargs[\'storage\'])}")\n    print(f"  Expected: storage should be in kwargs (callable)")\n    print()\n    \n    # Test field with callable that randomly returns storage\n    field = TestModel._meta.get_field(\'field_callable_random\')\n    name, path, args, kwargs = field.deconstruct()\n    print(f"field_callable_random:")\n    print(f"  Storage in kwargs: {\'storage\' in kwargs}")\n    if \'storage\' in kwargs:\n        print(f"  Storage value: {kwargs[\'storage\']}")\n        print(f"  Storage is callable: {callable(kwargs[\'storage\'])}")\n    print(f"  Expected: storage should be in kwargs (callable)")\n    print()\n    \n    # Test field with direct default_storage\n    field = TestModel._meta.get_field(\'field_direct_default\')\n    name, path, args, kwargs = field.deconstruct()\n    print(f"field_direct_default:")\n    print(f"  Storage in kwargs: {\'storage\' in kwargs}")\n    if \'storage\' in kwargs:\n        print(f"  Storage value: {kwargs[\'storage\']}")\n    print(f"  Expected: storage should NOT be in kwargs (direct default)")\n    print()\n    \n    # Test field with direct other_storage\n    field = TestModel._meta.get_field(\'field_direct_other\')\n    name, path, args, kwargs = field.deconstruct()\n    print(f"field_direct_other:")\n    print(f"  Storage in kwargs: {\'storage\' in kwargs}")\n    if \'storage\' in kwargs:\n        print(f"  Storage value: {kwargs[\'storage\']}")\n    print(f"  Expected: storage should be in kwargs (direct non-default)")\n    print()\n    \n    # Demonstrate the inconsistency with random callable\n    print("=== Demonstrating the inconsistency with random callable ===")\n    \n    # Run the random callable test multiple times to show inconsistency\n    for i in range(5):\n        # Create a new field instance each time\n        field_random = models.FileField(storage=get_storage_random)\n        field_random.contribute_to_class(TestModel, f\'random_field_{i}\')\n        \n        name, path, args, kwargs = field_random.deconstruct()\n        result = "INCLUDED" if \'storage\' in kwargs else "OMITTED"\n        storage_result = field_random.storage\n        storage_is_default = storage_result is default_storage\n        \n        print(f"Run {i+1}: Storage {\'IS\' if storage_is_default else \'IS NOT\'} default_storage, "\n              f"storage parameter is {result}")\n    \n    print("\\n=== Summary ===")\n    print("The issue: When a callable returns default_storage, the storage parameter")\n    print("is incorrectly omitted from the deconstructed form, making migrations")\n    print("inconsistent depending on what the callable returns at migration time.")\n\nif __name__ == \'__main__\':\n    test_deconstruct_behavior()'})
+
+
+## Step 16
+
+### 🤔 Thinking
+Now let me run the reproduction script to verify the issue:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 17
+
+### 🤔 Thinking
+Let me check the tests directory structure to find the correct settings file:
+
+### 🎯 Action
+bash({'command': 'find ./tests -name "settings*.py" | head -10'})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me check if there's a main settings file in the tests directory or if I need to use a different approach:
+
+### 🎯 Action
+bash({'command': 'find ./tests -name "runtests.py" | head -5'})
+
+
+## Step 19
+
+### 🤔 Thinking
+Let me check the runtests.py file to understand how to set up Django properly:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/runtests.py', 'view_range': [1, 50]})
+
+
+## Step 20
+
+### 🤔 Thinking
+Let me check how the Django setup is done in the runtests.py file:
+
+### 🎯 Action
+bash({'command': 'grep -A 10 -B 10 "django.setup\\|settings.configure" ./tests/runtests.py'})
+
+
+## Step 21
+
+### 🤔 Thinking
+Let me find the setup_run_tests function to understand how Django is configured:
+
+### 🎯 Action
+bash({'command': 'grep -A 20 "def setup_run_tests" ./tests/runtests.py'})
+
+
+## Step 22
+
+### 🤔 Thinking
+Let me find the setup_collect_tests function to understand how settings are configured:
+
+### 🎯 Action
+bash({'command': 'grep -A 30 "def setup_collect_tests" ./tests/runtests.py'})
+
+
+## Step 23
+
+### 🤔 Thinking
+Let me look at the complete settings configuration in the runtests.py file:
+
+### 🎯 Action
+bash({'command': 'grep -A 50 "settings.configure" ./tests/runtests.py'})
+
+
+## Step 24
+
+### 🤔 Thinking
+Let me search for the Django configuration more specifically:
+
+### 🎯 Action
+bash({'command': 'grep -n "DATABASES\\|SECRET_KEY\\|DEBUG\\|configure" ./tests/runtests.py | head -10'})
+
+
+## Step 25
+
+### 🤔 Thinking
+Let me look at the beginning of the runtests.py file to find the settings configuration:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/runtests.py', 'view_range': [100, 200]})
+
+
+## Step 26
+
+### 🤔 Thinking
+Let me check if there's a settings configuration in the main function or elsewhere:
+
+### 🎯 Action
+bash({'command': 'grep -A 50 "if __name__" ./tests/runtests.py'})
+
+
+## Step 27
+
+### 🤔 Thinking
+Let me look at the main function to see how the settings are handled:
+
+### 🎯 Action
+bash({'command': 'grep -B 10 -A 30 "main(" ./tests/runtests.py'})
+
+
+## Step 28
+
+### 🤔 Thinking
+Let me search for the settings configuration in the file more broadly:
+
+### 🎯 Action
+bash({'command': 'grep -n "settings" ./tests/runtests.py | head -20'})
+
+
+## Step 29
+
+### 🤔 Thinking
+Let me look at around line 580 in the main function:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/runtests.py', 'view_range': [570, 620]})
+
+
+## Step 30
+
+### 🤔 Thinking
+Let me look for how the setup is done:
+
+### 🎯 Action
+bash({'command': 'grep -n "args = parser.parse_args" ./tests/runtests.py'})
+
+
+## Step 31
+
+### 🤔 Thinking
+Let me search for where the settings are actually set up in the runtests.py file:
+
+### 🎯 Action
+bash({'command': 'grep -B 5 -A 15 "args =" ./tests/runtests.py | head -30'})
+
+
+## Step 32
+
+### 🤔 Thinking
+Let me look at the end of the runtests.py file to find the main function:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/runtests.py', 'view_range': [650, 700]})
+
+
+## Step 33
+
+### 🤔 Thinking
+Let me look for the actual main function call:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/runtests.py', 'view_range': [700, 800]})
+
+
+## Step 34
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/runtests.py', 'view_range': [700, 791]})
+
+
+## Step 35
+
+### 🤔 Thinking
+Perfect! Now I can see that the default Django settings module is "test_sqlite". Let me create a simpler reproduction script using this information:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': '#!/usr/bin/env python\n"""\nReproduction script for the FileField callable storage deconstruction issue.\n\nThis script demonstrates the bug where callable storage that returns default_storage\nis incorrectly omitted from the deconstructed form.\n"""\n\nimport os\nimport sys\nimport random\nfrom pathlib import Path\n\n# Add the current directory to Python path\nsys.path.insert(0, \'.\')\n\n# Setup Django\nos.environ.setdefault(\'DJANGO_SETTINGS_MODULE\', \'tests.settings\')\n\nimport django\ndjango.setup()', 'new_str': '#!/usr/bin/env python\n"""\nReproduction script for the FileField callable storage deconstruction issue.\n\nThis script demonstrates the bug where callable storage that returns default_storage\nis incorrectly omitted from the deconstructed form.\n"""\n\nimport os\nimport sys\nimport random\nfrom pathlib import Path\n\n# Add the current directory to Python path\nsys.path.insert(0, \'.\')\n\n# Setup Django\nos.environ.setdefault(\'DJANGO_SETTINGS_MODULE\', \'test_sqlite\')\n\nimport django\ndjango.setup()'})
+
+
+## Step 36
+
+### 🤔 Thinking
+Now let me run the reproduction script to see if it works:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 37
+
+### 🤔 Thinking
+Let me look for the test_sqlite module. It's likely a settings file in the repository:
+
+### 🎯 Action
+bash({'command': 'find . -name "test_sqlite*"'})
+
+
+## Step 38
+
+### 🤔 Thinking
+Great! The test_sqlite.py file is in the tests directory. Let me modify the reproduction script to use the correct path:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': "# Add the current directory to Python path\nsys.path.insert(0, '.')\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')", 'new_str': "# Add the current directory to Python path\nsys.path.insert(0, '.')\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')"})
+
+
+## Step 39
+
+### 🤔 Thinking
+Let me run the reproduction script again:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 40
+
+### 🤔 Thinking
+Perfect! The reproduction script is working and clearly demonstrates the issue. I can see:
+
+
+1. `field_callable_returns_default` has `Storage in kwargs: False` - this is the bug!
+
+2. `field_callable_returns_other` has `Storage in kwargs: True` - this is correct
+
+3. `field_callable_random` has `Storage in kwargs: True` - this is correct 
+
+4. `field_direct_default` has `Storage in kwargs: False` - this is correct
+
+5. `field_direct_other` has `Storage in kwargs: True` - this is correct
+
+The issue is confirmed: When a callable returns `default_storage`, the storage parameter is omitted from the deconstructed form, even though it should be included because it's a callable.
+
+Now let's move on to the fix analysis.
+
+### 👁️ Observation
+<observation>
+
+1. Successfully reproduced the issue: When a callable storage returns default_storage, it's incorrectly omitted from the deconstructed form.
+
+2. Alternative action could have been to create a more comprehensive test that covers additional edge cases.
+
+3. Next action: Analyze the fix approach based on the development knowledge and principles provided.
+</observation>
+
+## 
+3. FIX ANALYSIS
+
+### 🎯 Action
+think({'thought': 'Looking at the reproduction results, the issue is confirmed. The problem is in the deconstruct method of FileField at line 298:\n\n```python\nif self.storage is not default_storage:\n    kwargs["storage"] = getattr(self, "_storage_callable", self.storage)\n```\n\nWhen a callable returns `default_storage`, the condition `self.storage is not default_storage` evaluates to `False`, so the storage parameter is omitted from the deconstructed form. However, the field should still include the storage parameter because it was originally a callable.\n\nFollowing the development knowledge principles:\n\n
+1. **Preserve Original State Pattern**: The original callable is already stored in `self._storage_callable` when the storage is callable, so we should use this information.\n\n
+2. **Minimal Viable Change**: The fix should be surgical - only modify the condition to check if there\'s a callable storage, not change the entire architecture.\n\n
+3. **Existing Code Patterns**: Looking at line 299, the code already uses `getattr(self, "_storage_callable", self.storage)`, which is the correct approach.\n\nThe fix should be:\n- Change the condition from `if self.storage is not default_storage:` to `if hasattr(self, \'_storage_callable\') or self.storage is not default_storage:`\n- This preserves the original logic for non-callable storage while ensuring callable storage is always included\n\nThis is a minimal, surgical fix that uses existing patterns and doesn\'t change the data flow or interfaces.'})
+
+
+## Step 41
+
+### 🤔 Thinking
+Now I need to provide the final code change plan based on my analysis:
+
+### 📋 Conclusion
+<code_change_plan>
+## General Description of the Solution
+
+The issue is in the `FileField.deconstruct()` method at line 298 in `django/db/models/fields/files.py`. The condition `if self.storage is not default_storage:` incorrectly tests the evaluated storage result instead of checking whether the original storage parameter was a callable.
+
+**Root Cause**: When a callable storage function returns `default_storage`, the condition `self.storage is not default_storage` evaluates to `False`, causing the storage parameter to be omitted from the deconstructed form, even though it should be included because the original storage was a callable.
+
+**Fix Analysis**: The fix follows the minimal viable change principle by modifying only the condition that determines whether to include the storage parameter in the deconstructed form. The solution leverages the existing `_storage_callable` attribute that was properly implemented as part of the fix for issue #
+31941. The fix ensures that:
+
+
+1. If the original storage was a callable (indicated by the presence of `_storage_callable`), the storage parameter is always included in the deconstructed form
+
+2. If the original storage was not callable but differs from `default_storage`, it's included (preserving existing behavior)
+
+3. If the original storage was not callable and is `default_storage`, it's omitted (preserving existing behavior)
+
+**Reasoning**: This approach follows the established patterns in the codebase, maintains backward compatibility, and ensures that callable storage is always serialized consistently regardless of what the callable returns at runtime. The change is surgical and doesn't alter the fundamental data flow or interfaces.
+
+## Reproduction Script
+
+**Directory**: `./reproduction.py`
+
+**Current Output**: Shows that `field_callable_returns_default` has `Storage in kwargs: False` when it should have `Storage in kwargs: True`
+
+**Expected Output**: All callable storage fields should have `Storage in kwargs: True` regardless of what the callable returns.
+
+## Code Changes
+
+django/db/models/fields/files.py:
+- Change 1: Update the condition in the `deconstruct()` method (line 298) from `if self.storage is not default_storage:` to `if hasattr(self, '_storage_callable') or self.storage is not default_storage:`
+
+  Reasoning: This ensures that callable storage is always included in the deconstructed form, regardless of what the callable returns at runtime. The `hasattr(self, '_storage_callable')` check identifies when the original storage was a callable, while `self.storage is not default_storage` preserves the existing behavior for non-callable storage that differs from default_storage.
+</code_change_plan>
+</solution_mapper 0>
+
+<problem_solver 0>
+## Step 1
+
+### 🤔 Thinking
+The user is asking me to act as the Solution Mapper assistant and help map a solution to the problem. Based on the issue analysis, I need to:
+
+
+1. EXPLORATION: Find relevant files and understand the problem
+
+2. REPRODUCTION: Create a script to reproduce the issue
+
+3. FIX ANALYSIS: Develop a solution based on the principles provided
+
+Let me start with exploration to understand the repository structure and find the relevant files.
+
+### 👁️ Observation
+I'll help you map a solution to this problem. Let me start by exploring the repository structure and understanding the issue better.
+
+## 
+1. EXPLORATION
+
+Let me first explore the repository structure and locate the relevant files.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Now I need to find the FileField implementation mentioned in the issue. Based on the issue description, it's in `django/db/models/fields/files.py`.
+
+### 👁️ Observation
+Let me look at the FileField implementation mentioned in the issue analysis:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/db/models/fields/files.py'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I found the issue. Looking at the `FileField` class, I can see:
+
+
+1. In `__init__` method (lines 240-244), when storage is callable, it stores the original callable in `self._storage_callable` and then evaluates it.
+
+2. In the `deconstruct` method (lines 293-300), specifically on line 298, it checks `if self.storage is not default_storage:` and then on line 299 it uses `getattr(self, "_storage_callable", self.storage)`.
+
+The issue is that when the callable returns `default_storage`, the condition `self.storage is not default_storage` evaluates to `False`, so the storage parameter is omitted from the deconstructed form.
+
+This matches exactly what the issue description and analysis stated. Now let me look at the existing tests to understand the test structure.
+
+### 👁️ Observation
+<observation>
+
+1. Found the exact location of the bug: Line 298 in `FileField.deconstruct()` method uses `self.storage is not default_storage` which tests the evaluated result instead of checking for the original callable.
+
+2. Alternative action could have been to search for existing tests to understand the test structure first.
+
+3. Next action: Look at existing tests to understand how they test FileField deconstruction, especially for callable storage.
+</observation>
+
+Let me look at the existing test structure for FileField to understand the testing patterns:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests', 'keywords': ['file_storage', 'FileField', 'deconstruct', 'callable.*storage']})
+
+
+## Step 4
+
+### 🤔 Thinking
+Great! I found the file storage tests. Let me look at the specific test files that deal with callable storage:
+
+### 👁️ Observation
+Let me look at the file storage tests to understand how callable storage is tested:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/file_storage/tests.py', 'view_range': [1, 100]})
+
+
+## Step 5
+
+### 🤔 Thinking
+Let me find the specific tests for callable storage deconstruction:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './tests/file_storage/tests.py', 'keywords': ['callable_storage', 'deconstruct', 'storage.*callable']})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me search more specifically for tests that handle callable storage:
+
+### 🎯 Action
+bash({'command': 'grep -n "callable_storage\\|storage.*callable\\|deconstruct" ./tests/file_storage/tests.py | head -20'})
+
+
+## Step 7
+
+### 🤔 Thinking
+Now let me look at the specific test for callable storage deconstruction:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/file_storage/tests.py', 'view_range': [1012, 1025]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Perfect! I found the existing test for callable storage deconstruction. Now let me look at the models file to understand the test setup:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/file_storage/models.py'})
+
+
+## Step 9
+
+### 🤔 Thinking
+Perfect! Now I understand the test setup. The `callable_storage` function returns `temp_storage`, which is NOT the default storage. This is why the existing test passes - it's not testing the specific edge case where a callable returns `default_storage`.
+
+Now let me check what `default_storage` is:
+
+### 🎯 Action
+ask_repository_agent({'query': 'What is `default_storage` in Django? How is it defined and what does it typically point to?'})
+
+
+## Step 10
+
+### 🤔 Thinking
+Now I understand the issue better. Let me check what happens when `default_storage` is evaluated:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/core/files/storage.py', 'view_range': [1, 50]})
+
+
+## Step 11
+
+### 🤔 Thinking
+Let me search for the storage.py file:
+
+### 🎯 Action
+bash({'command': 'find . -name "storage.py" | head -10'})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me search for storage files more specifically:
+
+### 🎯 Action
+bash({'command': 'find ./django -name "*storage*" -type f | head -10'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me look for the storage module in the files system:
+
+### 🎯 Action
+bash({'command': 'find ./django/core/files -name "*.py" | head -10'})
+
+
+## Step 14
+
+### 🤔 Thinking
+Ah, the storage module is in a directory structure. Let me check the __init__.py file where default_storage is likely defined:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './django/core/files/storage/__init__.py'})
+
+
+## Step 15
+
+### 🤔 Thinking
+Perfect! Now I can see that `default_storage` is a `LazyObject` instance. This matches what the repository agent said. Now I'm ready to create the reproduction script.
+
+Let me create a reproduction script that demonstrates the issue:
+
+### 👁️ Observation
+## 
+2. REPRODUCTION
+
+Now let me create a reproduction script to demonstrate the issue:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './reproduction.py', 'file_text': '#!/usr/bin/env python\n"""\nReproduction script for the FileField callable storage deconstruction issue.\n\nThis script demonstrates the bug where callable storage that returns default_storage\nis incorrectly omitted from the deconstructed form.\n"""\n\nimport os\nimport sys\nimport random\nfrom pathlib import Path\n\n# Add the current directory to Python path\nsys.path.insert(0, \'.\')\n\n# Setup Django\nos.environ.setdefault(\'DJANGO_SETTINGS_MODULE\', \'tests.settings\')\n\nimport django\ndjango.setup()\n\nfrom django.core.files.storage import FileSystemStorage, default_storage\nfrom django.db import models\n\n# Create a storage instance that\'s not default_storage\nother_storage = FileSystemStorage(location=\'/tmp/other\')\n\ndef get_storage_returns_default():\n    """Callable that returns default_storage"""\n    return default_storage\n\ndef get_storage_returns_other():\n    """Callable that returns other_storage"""\n    return other_storage\n\ndef get_storage_random():\n    """Callable that randomly returns default_storage or other_storage"""\n    return random.choice([default_storage, other_storage])\n\n# Create test models\nclass TestModel(models.Model):\n    # This should always include storage in deconstruct since it\'s a callable\n    field_callable_returns_default = models.FileField(storage=get_storage_returns_default)\n    \n    # This should always include storage in deconstruct since it\'s a callable\n    field_callable_returns_other = models.FileField(storage=get_storage_returns_other)\n    \n    # This should always include storage in deconstruct since it\'s a callable\n    field_callable_random = models.FileField(storage=get_storage_random)\n    \n    # This should NOT include storage in deconstruct since it\'s not a callable\n    # and equals default_storage\n    field_direct_default = models.FileField(storage=default_storage)\n    \n    # This should include storage in deconstruct since it\'s not default_storage\n    field_direct_other = models.FileField(storage=other_storage)\n    \n    class Meta:\n        app_label = \'test_app\'\n\ndef test_deconstruct_behavior():\n    """Test the deconstruct behavior of different storage configurations"""\n    \n    print("=== FileField Storage Deconstruction Test ===\\n")\n    \n    # Test field with callable that returns default_storage\n    field = TestModel._meta.get_field(\'field_callable_returns_default\')\n    name, path, args, kwargs = field.deconstruct()\n    print(f"field_callable_returns_default:")\n    print(f"  Storage in kwargs: {\'storage\' in kwargs}")\n    if \'storage\' in kwargs:\n        print(f"  Storage value: {kwargs[\'storage\']}")\n        print(f"  Storage is callable: {callable(kwargs[\'storage\'])}")\n    print(f"  Expected: storage should be in kwargs (callable)")\n    print()\n    \n    # Test field with callable that returns other_storage  \n    field = TestModel._meta.get_field(\'field_callable_returns_other\')\n    name, path, args, kwargs = field.deconstruct()\n    print(f"field_callable_returns_other:")\n    print(f"  Storage in kwargs: {\'storage\' in kwargs}")\n    if \'storage\' in kwargs:\n        print(f"  Storage value: {kwargs[\'storage\']}")\n        print(f"  Storage is callable: {callable(kwargs[\'storage\'])}")\n    print(f"  Expected: storage should be in kwargs (callable)")\n    print()\n    \n    # Test field with callable that randomly returns storage\n    field = TestModel._meta.get_field(\'field_callable_random\')\n    name, path, args, kwargs = field.deconstruct()\n    print(f"field_callable_random:")\n    print(f"  Storage in kwargs: {\'storage\' in kwargs}")\n    if \'storage\' in kwargs:\n        print(f"  Storage value: {kwargs[\'storage\']}")\n        print(f"  Storage is callable: {callable(kwargs[\'storage\'])}")\n    print(f"  Expected: storage should be in kwargs (callable)")\n    print()\n    \n    # Test field with direct default_storage\n    field = TestModel._meta.get_field(\'field_direct_default\')\n    name, path, args, kwargs = field.deconstruct()\n    print(f"field_direct_default:")\n    print(f"  Storage in kwargs: {\'storage\' in kwargs}")\n    if \'storage\' in kwargs:\n        print(f"  Storage value: {kwargs[\'storage\']}")\n    print(f"  Expected: storage should NOT be in kwargs (direct default)")\n    print()\n    \n    # Test field with direct other_storage\n    field = TestModel._meta.get_field(\'field_direct_other\')\n    name, path, args, kwargs = field.deconstruct()\n    print(f"field_direct_other:")\n    print(f"  Storage in kwargs: {\'storage\' in kwargs}")\n    if \'storage\' in kwargs:\n        print(f"  Storage value: {kwargs[\'storage\']}")\n    print(f"  Expected: storage should be in kwargs (direct non-default)")\n    print()\n    \n    # Demonstrate the inconsistency with random callable\n    print("=== Demonstrating the inconsistency with random callable ===")\n    \n    # Run the random callable test multiple times to show inconsistency\n    for i in range(5):\n        # Create a new field instance each time\n        field_random = models.FileField(storage=get_storage_random)\n        field_random.contribute_to_class(TestModel, f\'random_field_{i}\')\n        \n        name, path, args, kwargs = field_random.deconstruct()\n        result = "INCLUDED" if \'storage\' in kwargs else "OMITTED"\n        storage_result = field_random.storage\n        storage_is_default = storage_result is default_storage\n        \n        print(f"Run {i+1}: Storage {\'IS\' if storage_is_default else \'IS NOT\'} default_storage, "\n              f"storage parameter is {result}")\n    \n    print("\\n=== Summary ===")\n    print("The issue: When a callable returns default_storage, the storage parameter")\n    print("is incorrectly omitted from the deconstructed form, making migrations")\n    print("inconsistent depending on what the callable returns at migration time.")\n\nif __name__ == \'__main__\':\n    test_deconstruct_behavior()'})
+
+
+## Step 16
+
+### 🤔 Thinking
+Now let me run the reproduction script to verify the issue:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 17
+
+### 🤔 Thinking
+Let me check the tests directory structure to find the correct settings file:
+
+### 🎯 Action
+bash({'command': 'find ./tests -name "settings*.py" | head -10'})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me check if there's a main settings file in the tests directory or if I need to use a different approach:
+
+### 🎯 Action
+bash({'command': 'find ./tests -name "runtests.py" | head -5'})
+
+
+## Step 19
+
+### 🤔 Thinking
+Let me check the runtests.py file to understand how to set up Django properly:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/runtests.py', 'view_range': [1, 50]})
+
+
+## Step 20
+
+### 🤔 Thinking
+Let me check how the Django setup is done in the runtests.py file:
+
+### 🎯 Action
+bash({'command': 'grep -A 10 -B 10 "django.setup\\|settings.configure" ./tests/runtests.py'})
+
+
+## Step 21
+
+### 🤔 Thinking
+Let me find the setup_run_tests function to understand how Django is configured:
+
+### 🎯 Action
+bash({'command': 'grep -A 20 "def setup_run_tests" ./tests/runtests.py'})
+
+
+## Step 22
+
+### 🤔 Thinking
+Let me find the setup_collect_tests function to understand how settings are configured:
+
+### 🎯 Action
+bash({'command': 'grep -A 30 "def setup_collect_tests" ./tests/runtests.py'})
+
+
+## Step 23
+
+### 🤔 Thinking
+Let me look at the complete settings configuration in the runtests.py file:
+
+### 🎯 Action
+bash({'command': 'grep -A 50 "settings.configure" ./tests/runtests.py'})
+
+
+## Step 24
+
+### 🤔 Thinking
+Let me search for the Django configuration more specifically:
+
+### 🎯 Action
+bash({'command': 'grep -n "DATABASES\\|SECRET_KEY\\|DEBUG\\|configure" ./tests/runtests.py | head -10'})
+
+
+## Step 25
+
+### 🤔 Thinking
+Let me look at the beginning of the runtests.py file to find the settings configuration:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/runtests.py', 'view_range': [100, 200]})
+
+
+## Step 26
+
+### 🤔 Thinking
+Let me check if there's a settings configuration in the main function or elsewhere:
+
+### 🎯 Action
+bash({'command': 'grep -A 50 "if __name__" ./tests/runtests.py'})
+
+
+## Step 27
+
+### 🤔 Thinking
+Let me look at the main function to see how the settings are handled:
+
+### 🎯 Action
+bash({'command': 'grep -B 10 -A 30 "main(" ./tests/runtests.py'})
+
+
+## Step 28
+
+### 🤔 Thinking
+Let me search for the settings configuration in the file more broadly:
+
+### 🎯 Action
+bash({'command': 'grep -n "settings" ./tests/runtests.py | head -20'})
+
+
+## Step 29
+
+### 🤔 Thinking
+Let me look at around line 580 in the main function:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/runtests.py', 'view_range': [570, 620]})
+
+
+## Step 30
+
+### 🤔 Thinking
+Let me look for how the setup is done:
+
+### 🎯 Action
+bash({'command': 'grep -n "args = parser.parse_args" ./tests/runtests.py'})
+
+
+## Step 31
+
+### 🤔 Thinking
+Let me search for where the settings are actually set up in the runtests.py file:
+
+### 🎯 Action
+bash({'command': 'grep -B 5 -A 15 "args =" ./tests/runtests.py | head -30'})
+
+
+## Step 32
+
+### 🤔 Thinking
+Let me look at the end of the runtests.py file to find the main function:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/runtests.py', 'view_range': [650, 700]})
+
+
+## Step 33
+
+### 🤔 Thinking
+Let me look for the actual main function call:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/runtests.py', 'view_range': [700, 800]})
+
+
+## Step 34
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './tests/runtests.py', 'view_range': [700, 791]})
+
+
+## Step 35
+
+### 🤔 Thinking
+Perfect! Now I can see that the default Django settings module is "test_sqlite". Let me create a simpler reproduction script using this information:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': '#!/usr/bin/env python\n"""\nReproduction script for the FileField callable storage deconstruction issue.\n\nThis script demonstrates the bug where callable storage that returns default_storage\nis incorrectly omitted from the deconstructed form.\n"""\n\nimport os\nimport sys\nimport random\nfrom pathlib import Path\n\n# Add the current directory to Python path\nsys.path.insert(0, \'.\')\n\n# Setup Django\nos.environ.setdefault(\'DJANGO_SETTINGS_MODULE\', \'tests.settings\')\n\nimport django\ndjango.setup()', 'new_str': '#!/usr/bin/env python\n"""\nReproduction script for the FileField callable storage deconstruction issue.\n\nThis script demonstrates the bug where callable storage that returns default_storage\nis incorrectly omitted from the deconstructed form.\n"""\n\nimport os\nimport sys\nimport random\nfrom pathlib import Path\n\n# Add the current directory to Python path\nsys.path.insert(0, \'.\')\n\n# Setup Django\nos.environ.setdefault(\'DJANGO_SETTINGS_MODULE\', \'test_sqlite\')\n\nimport django\ndjango.setup()'})
+
+
+## Step 36
+
+### 🤔 Thinking
+Now let me run the reproduction script to see if it works:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 37
+
+### 🤔 Thinking
+Let me look for the test_sqlite module. It's likely a settings file in the repository:
+
+### 🎯 Action
+bash({'command': 'find . -name "test_sqlite*"'})
+
+
+## Step 38
+
+### 🤔 Thinking
+Great! The test_sqlite.py file is in the tests directory. Let me modify the reproduction script to use the correct path:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': "# Add the current directory to Python path\nsys.path.insert(0, '.')\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')", 'new_str': "# Add the current directory to Python path\nsys.path.insert(0, '.')\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')"})
+
+
+## Step 39
+
+### 🤔 Thinking
+Let me run the reproduction script again:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 40
+
+### 🤔 Thinking
+Perfect! The reproduction script is working and clearly demonstrates the issue. I can see:
+
+
+1. `field_callable_returns_default` has `Storage in kwargs: False` - this is the bug!
+
+2. `field_callable_returns_other` has `Storage in kwargs: True` - this is correct
+
+3. `field_callable_random` has `Storage in kwargs: True` - this is correct 
+
+4. `field_direct_default` has `Storage in kwargs: False` - this is correct
+
+5. `field_direct_other` has `Storage in kwargs: True` - this is correct
+
+The issue is confirmed: When a callable returns `default_storage`, the storage parameter is omitted from the deconstructed form, even though it should be included because it's a callable.
+
+Now let's move on to the fix analysis.
+
+### 👁️ Observation
+<observation>
+
+1. Successfully reproduced the issue: When a callable storage returns default_storage, it's incorrectly omitted from the deconstructed form.
+
+2. Alternative action could have been to create a more comprehensive test that covers additional edge cases.
+
+3. Next action: Analyze the fix approach based on the development knowledge and principles provided.
+</observation>
+
+## 
+3. FIX ANALYSIS
+
+### 🎯 Action
+think({'thought': 'Looking at the reproduction results, the issue is confirmed. The problem is in the deconstruct method of FileField at line 298:\n\n```python\nif self.storage is not default_storage:\n    kwargs["storage"] = getattr(self, "_storage_callable", self.storage)\n```\n\nWhen a callable returns `default_storage`, the condition `self.storage is not default_storage` evaluates to `False`, so the storage parameter is omitted from the deconstructed form. However, the field should still include the storage parameter because it was originally a callable.\n\nFollowing the development knowledge principles:\n\n
+1. **Preserve Original State Pattern**: The original callable is already stored in `self._storage_callable` when the storage is callable, so we should use this information.\n\n
+2. **Minimal Viable Change**: The fix should be surgical - only modify the condition to check if there\'s a callable storage, not change the entire architecture.\n\n
+3. **Existing Code Patterns**: Looking at line 299, the code already uses `getattr(self, "_storage_callable", self.storage)`, which is the correct approach.\n\nThe fix should be:\n- Change the condition from `if self.storage is not default_storage:` to `if hasattr(self, \'_storage_callable\') or self.storage is not default_storage:`\n- This preserves the original logic for non-callable storage while ensuring callable storage is always included\n\nThis is a minimal, surgical fix that uses existing patterns and doesn\'t change the data flow or interfaces.'})
+
+
+## Step 41
+
+### 🤔 Thinking
+Now I need to provide the final code change plan based on my analysis:
+
+### 👁️ Observation
+<code_change_plan>
+## General Description of the Solution
+
+The issue is in the `FileField.deconstruct()` method at line 298 in `django/db/models/fields/files.py`. The condition `if self.storage is not default_storage:` incorrectly tests the evaluated storage result instead of checking whether the original storage parameter was a callable.
+
+**Root Cause**: When a callable storage function returns `default_storage`, the condition `self.storage is not default_storage` evaluates to `False`, causing the storage parameter to be omitted from the deconstructed form, even though it should be included because the original storage was a callable.
+
+**Fix Analysis**: The fix follows the minimal viable change principle by modifying only the condition that determines whether to include the storage parameter in the deconstructed form. The solution leverages the existing `_storage_callable` attribute that was properly implemented as part of the fix for issue #
+31941. The fix ensures that:
+
+
+1. If the original storage was a callable (indicated by the presence of `_storage_callable`), the storage parameter is always included in the deconstructed form
+
+2. If the original storage was not callable but differs from `default_storage`, it's included (preserving existing behavior)
+
+3. If the original storage was not callable and is `default_storage`, it's omitted (preserving existing behavior)
+
+**Reasoning**: This approach follows the established patterns in the codebase, maintains backward compatibility, and ensures that callable storage is always serialized consistently regardless of what the callable returns at runtime. The change is surgical and doesn't alter the fundamental data flow or interfaces.
+
+## Reproduction Script
+
+**Directory**: `./reproduction.py`
+
+**Current Output**: Shows that `field_callable_returns_default` has `Storage in kwargs: False` when it should have `Storage in kwargs: True`
+
+**Expected Output**: All callable storage fields should have `Storage in kwargs: True` regardless of what the callable returns.
+
+## Code Changes
+
+django/db/models/fields/files.py:
+- Change 1: Update the condition in the `deconstruct()` method (line 298) from `if self.storage is not default_storage:` to `if hasattr(self, '_storage_callable') or self.storage is not default_storage:`
+
+  Reasoning: This ensures that callable storage is always included in the deconstructed form, regardless of what the callable returns at runtime. The `hasattr(self, '_storage_callable')` check identifies when the original storage was a callable, while `self.storage is not default_storage` preserves the existing behavior for non-callable storage that differs from default_storage.
+</code_change_plan>
+
+
+## Step 42
+
+### 👁️ Observation
+Now let's implement the fix:
+
+## 
+1. FIX IMPLEMENTATION
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './django/db/models/fields/files.py', 'old_str': '    def deconstruct(self):\n        name, path, args, kwargs = super().deconstruct()\n        if kwargs.get("max_length") == 100:\n            del kwargs["max_length"]\n        kwargs["upload_to"] = self.upload_to\n        if self.storage is not default_storage:\n            kwargs["storage"] = getattr(self, "_storage_callable", self.storage)\n        return name, path, args, kwargs', 'new_str': '    def deconstruct(self):\n        name, path, args, kwargs = super().deconstruct()\n        if kwargs.get("max_length") == 100:\n            del kwargs["max_length"]\n        kwargs["upload_to"] = self.upload_to\n        if hasattr(self, \'_storage_callable\') or self.storage is not default_storage:\n            kwargs["storage"] = getattr(self, "_storage_callable", self.storage)\n        return name, path, args, kwargs'})
+
+
+## Step 43
+
+### 🤔 Thinking
+Perfect! I've made the minimal fix as planned. The change is:
+
+From:
+
+
+```python
+if self.storage is not default_storage:
+
+
+```
+
+To:
+
+
+```python
+if hasattr(self, '_storage_callable') or self.storage is not default_storage:
+
+
+```
+
+This ensures that callable storage is always included in the deconstructed form, regardless of what the callable returns at runtime.
+
+Now let me verify that this fix works by running the reproduction script again.
+
+### 👁️ Observation
+## 
+2. VERIFICATION
+
+### 2.1 Testing the Fix
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 44
+
+### 🤔 Thinking
+Excellent! The fix is working perfectly. Looking at the results:
+
+
+1. **`field_callable_returns_default`**: Now has `Storage in kwargs: True` and `Storage is callable: True` - **FIXED!** ✅
+
+2. **`field_callable_returns_other`**: Still has `Storage in kwargs: True` - **Working as expected** ✅
+
+3. **`field_callable_random`**: Still has `Storage in kwargs: True` - **Working as expected** ✅
+
+4. **`field_direct_default`**: Still has `Storage in kwargs: False` - **Working as expected** ✅
+
+5. **`field_direct_other`**: Still has `Storage in kwargs: True` - **Working as expected** ✅
+
+Most importantly, the "Demonstrating the inconsistency with random callable" section now shows that all runs include the storage parameter, regardless of what the callable returns at runtime. This proves the fix is working correctly!
+
+Let me now run some additional tests to make sure I haven't broken anything.
+
+### 👁️ Observation
+Perfect! The fix is working correctly. Let me run the existing tests to make sure I haven't broken anything:
+
+### 2.2 Testing Existing Functionality
+
+### 🎯 Action
+bash({'command': 'cd ./ && python -m pytest tests/file_storage/tests.py::FileFieldStorageTests::test_deconstruction -xvs'})
+
+
+## Step 45
+
+### 🤔 Thinking
+Let me run the tests using Django's test runner instead:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py file_storage.tests.FileFieldStorageTests.test_deconstruction'})
+
+
+## Step 46
+
+### 🤔 Thinking
+Let me find the correct test name:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py file_storage.tests -k "deconstruct" -v'})
+
+
+## Step 47
+
+### 🤔 Thinking
+Let me try a different approach:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py file_storage.tests -k deconstruct'})
+
+
+## Step 48
+
+### 🤔 Thinking
+Great! The existing tests are passing. Let me run a few more related tests:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py file_storage.tests.FileFieldStorageTests'})
+
+
+## Step 49
+
+### 🤔 Thinking
+Excellent! All the FileFieldStorageTests are passing. Let me also run some field deconstruction tests to make sure I haven't broken anything:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py field_deconstruction.tests'})
+
+
+## Step 50
+
+### 🤔 Thinking
+Perfect! All field deconstruction tests are passing. Let me run one more comprehensive test on FileField:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py model_fields.test_filefield'})
+
+
+## Step 51
+
+### 🤔 Thinking
+Excellent! All tests are passing. Let me also add a comprehensive test to verify our edge case more thoroughly:
+
+### 👁️ Observation
+### 2.3 Additional Edge Case Testing
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './test_comprehensive.py', 'file_text': '#!/usr/bin/env python\n"""\nComprehensive test for the FileField callable storage deconstruction fix.\nThis test verifies that the fix correctly handles all cases including edge cases.\n"""\n\nimport os\nimport sys\nimport tempfile\nsys.path.insert(0, \'.\')\n\n# Setup Django\nos.environ.setdefault(\'DJANGO_SETTINGS_MODULE\', \'tests.test_sqlite\')\n\nimport django\ndjango.setup()\n\nfrom django.core.files.storage import FileSystemStorage, default_storage\nfrom django.db import models\n\n# Test all combinations of callable and non-callable storage\nclass TestModel(models.Model):\n    # Edge case: callable returns default_storage\n    field_callable_default = models.FileField(storage=lambda: default_storage)\n    \n    # Edge case: callable returns a different storage\n    field_callable_other = models.FileField(storage=lambda: FileSystemStorage(location=\'/tmp\'))\n    \n    # Edge case: callable returns itself (callable storage class)\n    field_callable_class = models.FileField(storage=FileSystemStorage)\n    \n    # Normal case: direct default_storage (should NOT be in kwargs)\n    field_direct_default = models.FileField(storage=default_storage)\n    \n    # Normal case: direct other storage (should be in kwargs)\n    field_direct_other = models.FileField(storage=FileSystemStorage(location=\'/tmp\'))\n    \n    # Edge case: no storage specified (should use default, should NOT be in kwargs)\n    field_no_storage = models.FileField()\n    \n    class Meta:\n        app_label = \'test_app\'\n\ndef test_all_cases():\n    """Test all combinations of callable and non-callable storage."""\n    print("=== Comprehensive FileField Storage Deconstruction Test ===\\n")\n    \n    test_cases = [\n        (\'field_callable_default\', True, \'callable that returns default_storage\'),\n        (\'field_callable_other\', True, \'callable that returns other storage\'),\n        (\'field_callable_class\', True, \'callable storage class\'),\n        (\'field_direct_default\', False, \'direct default_storage\'),\n        (\'field_direct_other\', True, \'direct other storage\'),\n        (\'field_no_storage\', False, \'no storage specified (uses default)\'),\n    ]\n    \n    for field_name, expected_in_kwargs, description in test_cases:\n        field = TestModel._meta.get_field(field_name)\n        name, path, args, kwargs = field.deconstruct()\n        \n        storage_in_kwargs = \'storage\' in kwargs\n        \n        print(f"{field_name}:")\n        print(f"  Description: {description}")\n        print(f"  Storage in kwargs: {storage_in_kwargs}")\n        print(f"  Expected: {expected_in_kwargs}")\n        print(f"  Result: {\'✅ PASS\' if storage_in_kwargs == expected_in_kwargs else \'❌ FAIL\'}")\n        \n        if storage_in_kwargs and \'storage\' in kwargs:\n            storage_value = kwargs[\'storage\']\n            print(f"  Storage value: {storage_value}")\n            print(f"  Storage is callable: {callable(storage_value)}")\n            \n            # For callable storage, the original callable should be preserved\n            if hasattr(field, \'_storage_callable\'):\n                print(f"  Original callable preserved: ✅ YES")\n            else:\n                print(f"  Original callable preserved: ❌ NO")\n                \n        print()\n    \n    print("=== Migration Consistency Test ===")\n    print("Testing that callable storage always includes storage parameter")\n    print("regardless of what the callable returns at runtime...")\n    \n    # Test multiple evaluations of the same callable field\n    for i in range(5):\n        field = TestModel._meta.get_field(\'field_callable_default\')\n        name, path, args, kwargs = field.deconstruct()\n        storage_in_kwargs = \'storage\' in kwargs\n        \n        print(f"Evaluation {i+1}: Storage in kwargs: {storage_in_kwargs}")\n        \n        if not storage_in_kwargs:\n            print("❌ FAIL: Storage parameter missing - this would cause migration inconsistency!")\n            return False\n    \n    print("✅ PASS: All evaluations consistently include storage parameter")\n    return True\n\nif __name__ == \'__main__\':\n    success = test_all_cases()\n    print(f"\\n=== Final Result: {\'✅ ALL TESTS PASSED\' if success else \'❌ SOME TESTS FAILED\'} ===")'})
+
+
+## Step 52
+
+### 🤔 Thinking
+Now let me run this comprehensive test:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python test_comprehensive.py'})
+
+
+## Step 53
+
+### 🤔 Thinking
+Perfect! All tests are passing. The fix is working exactly as expected:
+
+
+1. **Callable storage that returns default_storage** - ✅ INCLUDED (this was the bug, now fixed)
+
+2. **Callable storage that returns other storage** - ✅ INCLUDED (preserved existing behavior)
+
+3. **Callable storage class** - ✅ INCLUDED (preserved existing behavior)
+
+4. **Direct default_storage** - ✅ OMITTED (preserved existing behavior)
+
+5. **Direct other storage** - ✅ INCLUDED (preserved existing behavior)
+
+6. **No storage specified** - ✅ OMITTED (preserved existing behavior)
+
+The migration consistency test shows that the storage parameter is now always included for callable storage, regardless of what the callable returns at runtime.
+
+Let me do one final test to make sure I haven't broken anything related to migrations:
+
+### 👁️ Observation
+## 
+3. FINAL REVIEW
+
+### 3.1 Ensure All Requirements Are Met
+
+Looking at the original issue and requirements:
+
+
+1. **Issue**: ✅ Fixed - Callable storage that returns default_storage now includes storage parameter in deconstruct
+
+2. **Backward Compatibility**: ✅ Preserved - All existing behavior for non-callable storage remains unchanged
+
+3. **Migration Consistency**: ✅ Fixed - Storage parameter is consistently included for callable storage regardless of return value
+
+4. **Code Quality**: ✅ Minimal change - Only one line changed, surgical fix
+
+### 3.2 Test Related Migration Functionality
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py migrations.test_writer.WriterTests.test_serialize_callable_storage'})
+
+
+## Step 54
+
+### 🤔 Thinking
+Let me check the migrations tests more broadly:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py migrations.test_writer -k "storage" --verbosity=2'})
+
+
+## Step 55
+
+### 🤔 Thinking
+Let me check if there are any FileField tests in migrations:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py migrations.test_autodetector -k "FileField" --verbosity=2'})
+
+
+## Step 56
+
+### 🤔 Thinking
+Let me run a broader test to make sure migrations work correctly:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py migrations.test_autodetector --verbosity=1'})
+
+
+## Step 57
+
+### 🤔 Thinking
+Excellent! All migration autodetector tests are passing. Let me also verify the test with the current FileField tests:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py file_storage --verbosity=1'})
+
+
+## Step 58
+
+### 🤔 Thinking
+Perfect! All 182 file_storage tests are passing. Let me check some specific tests that might use callable storage:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py file_storage.tests.FileFieldStorageTests.test_callable_storage_file_field_in_model'})
+
+
+## Step 59
+
+### 🤔 Thinking
+Let me check which test methods are available:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python -c "\nimport os\nimport sys\nsys.path.insert(0, \'.\')\nos.environ.setdefault(\'DJANGO_SETTINGS_MODULE\', \'tests.test_sqlite\')\nimport django\ndjango.setup()\nfrom tests.file_storage.tests import FileFieldStorageTests\nimport inspect\nmethods = [m for m in dir(FileFieldStorageTests) if m.startswith(\'test_\')]\nfor method in methods:\n    print(method)\n"'})
+
+
+## Step 60
+
+### 🤔 Thinking
+That's okay, the tests are running fine through the test runner which sets up the proper Django environment. Let me run a final verification by running the test that was mentioned in the issue analysis:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py file_storage.tests -k "callable" --verbosity=2'})
+
+
+## Step 61
+
+### 🤔 Thinking
+Perfect! All the callable storage tests are passing. Let me now run one final comprehensive test to ensure everything is working:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python tests/runtests.py file_storage.tests.FieldCallableFileStorageTests --verbosity=2'})
+
+
+## Step 62
+
+### 🤔 Thinking
+Excellent! All the callable storage tests are passing, including the `test_deconstruction` test that was mentioned in the issue analysis. 
+
+Let me do one final check by running our reproduction script one more time to confirm the fix is working:
+
+### 🎯 Action
+bash({'command': 'cd ./ && python reproduction.py'})
+
+
+## Step 63
+
+### 🤔 Thinking
+Perfect! The fix is working correctly. All the test results show:
+
+
+1. **The original issue is fixed**: `field_callable_returns_default` now has `Storage in kwargs: True` 
+
+2. **Migration consistency is achieved**: All runs of the random callable now include the storage parameter, regardless of what the callable returns
+
+3. **Backward compatibility is preserved**: All other cases work exactly as before
+
+4. **All existing tests pass**: No regression in functionality
+
+The solution is complete and working as expected. Let me create a final summary.
+
+### 📋 Conclusion
+## Summary
+
+### ✅ **Issue Successfully Fixed**
+
+The issue with FileField callable storage deconstruction has been successfully resolved with a minimal, surgical fix.
+
+### **What Was Fixed:**
+
+**Before**: When a callable storage function returned `default_storage`, the `deconstruct()` method incorrectly omitted the storage parameter from the deconstructed form, causing migration inconsistencies.
+
+**After**: All callable storage functions now consistently include the storage parameter in the deconstructed form, regardless of what they return at runtime.
+
+### **The Fix:**
+
+**File**: `django/db/models/fields/files.py`  
+**Line**: 299 (previously 298)  
+**Change**: 
+
+
+```python
+# Before:
+if self.storage is not default_storage:
+
+# After:
+if hasattr(self, '_storage_callable') or self.storage is not default_storage:
+
+
+```
+
+### **Testing Results:**
+
+
+1. **Original reproduction test**: ✅ **FIXED** - `field_callable_returns_default` now includes storage in kwargs
+
+2. **Migration consistency test**: ✅ **FIXED** - All random callable evaluations now consistently include storage parameter
+
+3. **Backward compatibility**: ✅ **PRESERVED** - All existing behavior unchanged
+
+4. **Existing tests**: ✅ **ALL PASSING** - 182 file_storage tests, 35 field_deconstruction tests, 170 migration tests
+
+5. **Comprehensive edge cases**: ✅ **ALL PASSING** - All combinations of callable/non-callable storage work correctly
+
+### **Key Benefits:**
+
+- **Migration Consistency**: `makemigrations` will now consistently include callable storage, preventing the random inclusion/omission behavior
+- **Minimal Impact**: Only one line changed, preserving all existing functionality
+- **Correct Behavior**: Callable storage is always preserved in migrations, regardless of runtime evaluation
+- **Backward Compatible**: No changes to existing APIs or behavior for non-callable storage
+
+The fix follows the development principles of preserving original state, making minimal viable changes, and using existing code patterns. The solution is robust, well-tested, and ready for production use.
+
+
+The final patch is:
+diff --git a/django/db/models/fields/files.py b/django/db/models/fields/files.py
+index 7a99b12691..8f7e8e90f5 100644
+--- a/django/db/models/fields/files.py
++++ b/django/db/models/fields/files.py
+@@ -295,7 +295,7 @@ class FileField(Field):
+         if kwargs.get("max_length") == 100:
+             del kwargs["max_length"]
+         kwargs["upload_to"] = self.upload_to
+-        if self.storage is not default_storage:
++        if hasattr(self, '_storage_callable') or self.storage is not default_storage:
+             kwargs["storage"] = getattr(self, "_storage_callable", self.storage)
+         return name, path, args, kwargs
+</problem_solver 0>

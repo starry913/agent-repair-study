@@ -1,0 +1,2567 @@
+<issue_description>
+In v5.3, NDDataRef mask propagation fails when one of the operand does not have a mask
+### Description
+
+This applies to v5.3. 
+
+It looks like when one of the operand does not have a mask, the mask propagation when doing arithmetic, in particular with `handle_mask=np.bitwise_or` fails.  This is not a problem in v5.2.
+
+I don't know enough about how all that works, but it seems from the error that the operand without a mask is set as a mask of None's and then the bitwise_or tries to operate on an integer and a None and fails.
+
+### Expected behavior
+
+When one of the operand does not have mask, the mask that exists should just be copied over to the output.  Or whatever was done in that situation in v5.2 where there's no problem.
+
+### How to Reproduce
+
+This is with v5.3.   With v5.2, there are no errors.
+
+```
+>>> import numpy as np
+>>> from astropy.nddata import NDDataRef
+
+>>> array = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]])
+>>> mask = np.array([[0, 1, 64], [8, 0, 1], [2, 1, 0]])
+
+>>> nref_nomask = NDDataRef(array)
+>>> nref_mask = NDDataRef(array, mask=mask)
+
+# multiply no mask by constant (no mask * no mask)
+>>> nref_nomask.multiply(1., handle_mask=np.bitwise_or).mask   # returns nothing, no mask,  OK
+
+# multiply no mask by itself (no mask * no mask)
+>>> nref_nomask.multiply(nref_nomask, handle_mask=np.bitwise_or).mask # return nothing, no mask, OK
+
+# multiply mask by constant (mask * no mask)
+>>> nref_mask.multiply(1., handle_mask=np.bitwise_or).mask
+...
+TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'
+
+# multiply mask by itself (mask * mask)
+>>> nref_mask.multiply(nref_mask, handle_mask=np.bitwise_or).mask
+array([[ 0,  1, 64],
+       [ 8,  0,  1],
+       [ 2,  1,  0]])
+
+# multiply mask by no mask (mask * no mask)
+>>> nref_mask.multiply(nref_nomask, handle_mask=np.bitwise_or).mask
+...
+TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'
+```
+
+
+### Versions
+
+>>> import sys; print("Python", sys.version)
+Python 3.10.11 | packaged by conda-forge | (main, May 10 2023, 19:07:22) [Clang 14.0.6 ]
+>>> import astropy; print("astropy", astropy.__version__)
+astropy 5.3
+>>> import numpy; print("Numpy", numpy.__version__)
+Numpy 1.24.3
+>>> import erfa; print("pyerfa", erfa.__version__)
+pyerfa 2.0.0.3
+>>> import scipy; print("Scipy", scipy.__version__)
+Scipy 1.10.1
+>>> import matplotlib; print("Matplotlib", matplotlib.__version__)
+Matplotlib 3.7.1
+</issue_description>
+
+<problem_decoder 0>
+## Step 1
+
+### 🤔 Thinking
+Let me start by exploring the repository structure to understand the codebase layout and find the relevant files for this issue.
+
+The issue is about NDDataRef mask propagation failing when one of the operands doesn't have a mask. This seems to be related to mask handling in the NDDataRef class in astropy version 5.
+3. Let me start by exploring the repository structure.
+
+### 👁️ Observation
+I'll analyze the issue step by step, starting with exploring the repository structure and then understanding the problem.
+
+### 🎯 Action
+view_directory({'dir_path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Good, I can see the repository structure. The issue is related to NDDataRef which should be in the `astropy/nddata/` directory. Let me explore that directory.
+
+### 🎯 Action
+view_directory({'dir_path': 'astropy/nddata/'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Great, I can see the NDData module structure. The issue is about NDDataRef, which is likely in the main NDData files. Let me first check the __init__.py file to understand how NDDataRef is exposed.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/__init__.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Let me check the different NDData files to understand where NDDataRef is defined. It might be in nddata.py or nddata_withmixins.py.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'astropy/nddata/', 'keywords': ['NDDataRef']})
+
+
+## Step 5
+
+### 🤔 Thinking
+Perfect! I found the NDDataRef class in nddata_withmixins.py. Let me examine that file to understand how it works.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/nddata_withmixins.py'})
+
+
+## Step 6
+
+### 🤔 Thinking
+Now I understand the structure. NDDataRef is a class that inherits from NDArithmeticMixin, NDIOMixin, NDSlicingMixin, and NDData. The arithmetic operation `multiply` is likely defined in NDArithmeticMixin, and the mask handling issue might be in how the mask is propagated there.
+
+Let me check the arithmetic mixin to understand the implementation of multiply and how mask propagation works.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/mixins/ndarithmetic.py'})
+
+
+## Step 7
+
+### 🤔 Thinking
+Now I can see the issue. Looking at the `_arithmetic_mask` method (lines 485-527), I can see that the mask handling is done here. The issue is in line 527:
+
+
+
+```python
+return handle_mask(self.mask, operand.mask, **kwds)
+
+
+```
+
+The problem is that when one of the operands doesn't have a mask, the mask might be `None`, and then when `handle_mask` is called with `np.bitwise_or`, it would try to do a bitwise OR between an integer and None, which causes the error.
+
+Let me check the issue more carefully. Let's look at line 520:
+
+
+
+```python
+elif self.mask is None and operand is not None:
+    # Make a copy so there is no reference in the result.
+    return deepcopy(operand.mask)
+
+
+```
+
+But there's a problem here. If `operand.mask` is `None`, this would return `None`. Then at line 527, when both masks are not None but one is None, it would try to call `handle_mask(self.mask, operand.mask, **kwds)` where one of the masks is None, which would cause the error.
+
+Let me also look at the failing cases and the NDData class structure to understand better how masks are handled.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/nddata.py', 'view_range': [1, 150]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Let me continue reading the NDData class to understand how masks are handled.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/nddata.py', 'view_range': [150, 350]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Now I need to look at some tests to better understand the expected behavior and also check how the mask propagation is supposed to work. Let me look at the test file for the NDArithmeticMixin to understand the expected behavior better.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [1, 100]})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me search for tests related to mask propagation specifically to understand how it's expected to work.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'astropy/nddata/mixins/tests/test_ndarithmetic.py', 'keywords': ['mask', 'handle_mask', 'bitwise_or']})
+
+
+## Step 11
+
+### 🤔 Thinking
+Interesting, there are no results for those keywords. Let me try a broader search for "mask" in the test file.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'astropy/nddata/mixins/tests/test_ndarithmetic.py', 'keywords': ['mask']})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me look for any tests that might be related to the actual issue. Let me search the test file more broadly.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [400, 600]})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me look for mask-related tests in the broader test suite.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'astropy/nddata/tests/', 'keywords': ['mask', 'bitwise_or', 'handle_mask']})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me look at the NDData test file to see if there are any mask-related tests that might help us understand the expected behavior.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'astropy/nddata/tests/test_nddata.py', 'keywords': ['mask']})
+
+
+## Step 15
+
+### 🤔 Thinking
+Let me look at the relevant line numbers mentioned in the search results to understand how mask tests are structured.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/tests/test_nddata.py', 'view_range': [19, 80]})
+
+
+## Step 16
+
+### 🤔 Thinking
+Let me look for mask-related tests in the test file.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/tests/test_nddata.py', 'view_range': [600, 700]})
+
+
+## Step 17
+
+### 🤔 Thinking
+I found a test with masks! Let me look for tests related to the actual issue. Let me search for tests that might be testing the mask propagation issue we're seeing.
+
+### 🎯 Action
+ask_repository_agent({'query': 'Can you find tests that specifically test the mask propagation when one of the operands does not have a mask in NDDataRef arithmetic operations?'})
+
+
+## Step 18
+
+### 🤔 Thinking
+That's interesting. The documentation shows examples that suggest the mask propagation is supposed to work when one operand has no mask. Let me look at the actual error condition more carefully by reproducing it locally or looking at the error more carefully.
+
+Let me examine the issue again - the error is:
+`TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'`
+
+This suggests that when `np.bitwise_or` is called on an integer and a `None` value, it fails. Let me look at the `_arithmetic_mask` method again and understand exactly where the problem is.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/mixins/ndarithmetic.py', 'view_range': [485, 527]})
+
+
+## Step 19
+
+### 🤔 Thinking
+Now I understand the issue better. Looking at the code, the problem is in the else block on line 
+527. This is the case where both `self.mask` and `operand.mask` are not None. However, it's possible that one of them is still None due to the logic flow.
+
+Let me think about this more carefully:
+
+1. Line 516-519: If both masks are None OR handle_mask is None, return None
+
+2. Line 520-522: If self.mask is None but operand.mask is not None, return deepcopy(operand.mask)
+
+3. Line 523-524: If operand is None, return deepcopy(self.mask)
+
+4. Line 525-527: Otherwise, call handle_mask(self.mask, operand.mask, **kwds)
+
+The issue is that we can reach line 527 when one of the masks is None. For example, if `self.mask` is not None but `operand.mask` is None, then we would get to line 527 and call `handle_mask(self.mask, None, **kwds)`.
+
+This happens because the condition on line 520 only checks if `self.mask is None`, not if `operand.mask is None`. 
+
+Looking at the scenarios from the issue description:
+
+1. `nref_mask.multiply(1., handle_mask=np.bitwise_or)` - this is a scalar multiplication, so `operand` is a scalar wrapped in an NDData object without a mask.
+
+2. `nref_mask.multiply(nref_nomask, handle_mask=np.bitwise_or)` - here `operand` is an NDData object without a mask.
+
+In both cases, we'd have `self.mask` not None and `operand.mask` None, which leads to the `else` clause and the error.
+
+The fix would be to handle the case where `operand.mask is None` but `self.mask` is not None.
+
+### 🎯 Action
+think({'thought': "Now I understand the issue. The problem is in the `_arithmetic_mask` method in the NDArithmeticMixin class. The logic doesn't properly handle the case where one operand has a mask and the other doesn't.\n\nLet me trace through the scenarios:\n
+1. `nref_mask.multiply(1., handle_mask=np.bitwise_or)` - here `self.mask` is not None but `operand.mask` is None (scalar converted to NDData)\n
+2. `nref_mask.multiply(nref_nomask, handle_mask=np.bitwise_or)` - here `self.mask` is not None but `operand.mask` is None\n\nIn both cases, the code reaches the `else` clause on line 527 and calls `handle_mask(self.mask, operand.mask, **kwds)` where `operand.mask` is None. When `handle_mask` is `np.bitwise_or`, this tries to do a bitwise OR between an integer/array and None, which fails.\n\nThe fix is to add a condition to handle the case where `operand.mask is None` but `self.mask` is not None. This case should return `deepcopy(self.mask)` similar to how the opposite case is handled."})
+
+
+## Step 20
+
+### 🤔 Thinking
+Now I need to look at how the operand is converted to understand better. Let me check the `_prepare_then_do_arithmetic` method to see how scalars are converted to NDData objects.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/mixins/ndarithmetic.py', 'view_range': [720, 730]})
+
+
+## Step 21
+
+### 🤔 Thinking
+Perfect! So when we do `nref_mask.multiply(1., handle_mask=np.bitwise_or)`, the scalar `1.` is converted to an NDData object using `cls(operand2)` on line 
+728. This creates an NDData object with only data and no mask, unit, etc.
+
+Now let me check what happens when we create an NDData object from a scalar.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/nddata.py', 'view_range': [126, 150]})
+
+
+## Step 22
+
+### 🤔 Thinking
+Let me check the mask setter to see what happens.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/nddata.py', 'view_range': [285, 300]})
+
+
+## Step 23
+
+### 🤔 Thinking
+Good, so when `cls(operand2)` is called with just a scalar, it creates an NDData object with `mask=None` (the default parameter). Then later when we access `operand.mask`, it will be `None`.
+
+Now I have a clear understanding of the issue. The bug is in the `_arithmetic_mask` method. The condition checks don't properly handle all cases where one operand has a mask and the other doesn't. Specifically, the case where `operand.mask is None` but `self.mask` is not None is not handled properly.
+
+Let me create a proper issue analysis now.
+
+### 👁️ Observation
+## PHASE 1: READING
+
+The issue describes a problem in astropy v5.3 with NDDataRef mask propagation during arithmetic operations when one operand has a mask and the other doesn't. The specific error is:
+
+
+
+```
+TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'
+
+
+```
+
+**Key technical details:**
+- **Error occurs** when using `handle_mask=np.bitwise_or` parameter in arithmetic operations
+- **Method name:** `multiply()` (and likely other arithmetic operations)
+- **Classes involved:** `NDDataRef` (which inherits from `NDArithmeticMixin`)
+- **Error condition:** One operand has a mask, the other doesn't have a mask (mask=None)
+- **Expected behavior:** The mask from the operand that has one should be copied to the result
+- **Working cases:** Both operands have masks, or both don't have masks
+
+## PHASE 2: EXPLORATION
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/mixins/ndarithmetic.py', 'view_range': [515, 527]})
+
+
+## Step 24
+
+### 🤔 Thinking
+I found the root cause! The issue is in the `_arithmetic_mask` method. The logic is incomplete. Let me analyze the conditions:
+
+
+1. Line 516-519: If both masks are None OR handle_mask is None, return None
+
+2. Line 520-522: If self.mask is None but operand.mask is not None, return deepcopy(operand.mask)
+
+3. Line 523-524: If operand is None, return deepcopy(self.mask)
+
+4. Line 525-527: Otherwise (else case), call handle_mask(self.mask, operand.mask, **kwds)
+
+The problem is that the condition in line 520 only checks if `self.mask is None`, but doesn't check if `operand.mask is None`. This means that when `self.mask` is not None but `operand.mask` is None, we fall through to the `else` clause and call `handle_mask(self.mask, None, **kwds)`.
+
+When `handle_mask` is `np.bitwise_or`, this tries to do a bitwise OR between an integer/array and None, which fails with the TypeError.
+
+The fix is to add a condition to handle the case where `operand.mask is None` but `self.mask` is not None, which should return `deepcopy(self.mask)`.
+
+### 📋 Conclusion
+<observation>
+
+1. Found the root cause: In the `_arithmetic_mask` method (lines 515-527), the conditional logic is incomplete and doesn't handle the case where `self.mask` is not None but `operand.mask` is None.
+
+
+2. Alternative action could have been to look at the version differences between v5.2 and v5.3 to see what changed, but analyzing the current code structure was more efficient.
+
+
+3. Next action: Create a comprehensive issue analysis that includes all the details necessary for the Solution Mapper to fix this bug.
+</observation>
+
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "NDDataRef mask propagation fails when one operand has a mask and the other doesn't during arithmetic operations with handle_mask=np.bitwise_or, causing a TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'"
+    - status: "yes"
+  </problem_statement>
+  <root_cause>
+    The root cause is in the `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py` at lines 515-
+527. The conditional logic is incomplete and doesn't handle the case where `self.mask` is not None but `operand.mask` is None. 
+
+    Current logic:
+    
+1. If both masks are None OR handle_mask is None → return None
+    
+2. If self.mask is None but operand.mask is not None → return deepcopy(operand.mask)
+    
+3. If operand is None → return deepcopy(self.mask)
+    
+4. **Missing case**: If self.mask is not None but operand.mask is None → falls through to else clause
+    
+5. Else → call handle_mask(self.mask, operand.mask, **kwds)
+
+    The missing case causes the code to reach the else clause and call `handle_mask(self.mask, None, **kwds)`, which when `handle_mask=np.bitwise_or` tries to perform a bitwise OR operation between an integer/array and None, resulting in the TypeError.
+  </root_cause>
+  <current_behavior>
+    - **File**: `astropy/nddata/mixins/ndarithmetic.py`
+    - **Method**: `_arithmetic_mask` (lines 485-527)
+    - **Current implementation**: The method has incomplete conditional logic that doesn't handle all scenarios where one operand has a mask and the other doesn't
+    - **Current limitations**: When `self.mask` is not None but `operand.mask` is None, the method falls through to the else clause and calls `handle_mask(self.mask, None, **kwds)`, causing a TypeError when `handle_mask` is `np.bitwise_or`
+    - **Affected operations**: All arithmetic operations (`add`, `subtract`, `multiply`, `divide`) in `NDDataRef` class when using `handle_mask=np.bitwise_or` with one operand having a mask and the other not having a mask
+  </current_behavior>
+  <expected_behavior>
+    - **File**: `astropy/nddata/mixins/ndarithmetic.py`
+    - **Method**: `_arithmetic_mask` method needs modification
+    - **Expected implementation**: Add a condition to handle the case where `operand.mask is None` but `self.mask` is not None, which should return `deepcopy(self.mask)`
+    - **Specific behavioral improvements**: 
+      
+1. When one operand has a mask and the other doesn't, the result should inherit the mask from the operand that has one
+      
+2. The `handle_mask` callable should only be called when both operands have masks
+      
+3. All arithmetic operations should work properly with `handle_mask=np.bitwise_or` regardless of which operand has a mask
+    - **Expected result**: `nref_mask.multiply(1., handle_mask=np.bitwise_or).mask` should return the mask from `nref_mask`, and `nref_mask.multiply(nref_nomask, handle_mask=np.bitwise_or).mask` should also return the mask from `nref_mask`
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 0>
+
+<problem_decoder 1>
+## Step 1
+
+### 🤔 Thinking
+Let me start by understanding the issue described in the issue description. The user is reporting that in v5.3 of astropy, NDDataRef mask propagation fails when one of the operands doesn't have a mask.
+
+Key points from the issue:
+
+1. This applies to v5.3 (v5.2 was working fine)
+
+2. The issue occurs during arithmetic operations with `handle_mask=np.bitwise_or`
+
+3. When one operand doesn't have a mask (it's None), the bitwise_or operation tries to operate on an integer and a None, causing a TypeError
+
+4. Expected behavior is that the mask should be copied over to the output when one operand doesn't have a mask
+
+Let me explore the repository structure to understand how NDDataRef and mask handling works.
+
+### 👁️ Observation
+I'll help you analyze this issue. Let me start by exploring the repository structure to understand how NDDataRef and mask handling works.
+
+### 🎯 Action
+view_directory({'dir_path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+Great! I can see there's an `astropy/nddata/` directory. Let me explore that to understand the structure.
+
+### 🎯 Action
+view_directory({'dir_path': 'astropy/nddata/'})
+
+
+## Step 3
+
+### 🤔 Thinking
+I can see the `nddata` package has several key files. The issue mentions `NDDataRef`, so let me look for that. Let me also check what's in the `__init__.py` file to understand what's exported.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/__init__.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Now I need to find `NDDataRef`. Let me search for it in the nddata directory.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'astropy/nddata/', 'keywords': ['NDDataRef']})
+
+
+## Step 5
+
+### 🤔 Thinking
+It looks like `NDDataRef` is defined in `astropy/nddata/nddata_withmixins.py`. Let me check that file to understand how NDDataRef is implemented.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/nddata_withmixins.py'})
+
+
+## Step 6
+
+### 🤔 Thinking
+I can see that `NDDataRef` is a class that inherits from `NDArithmeticMixin`, `NDIOMixin`, `NDSlicingMixin`, and `NDData`. The issue mentions that the problem occurs during arithmetic operations with `handle_mask=np.bitwise_or`. The arithmetic functionality comes from `NDArithmeticMixin`, so let me look at that file.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/mixins/ndarithmetic.py'})
+
+
+## Step 7
+
+### 🤔 Thinking
+This is a very long file. Let me look for the `_arithmetic_mask` method specifically, which is the one that handles mask operations. I found it starts at line 
+485. Looking at the code:
+
+
+
+```python
+def _arithmetic_mask(self, operation, operand, handle_mask, axis=None, **kwds):
+    """
+    Calculate the resulting mask.
+
+    This is implemented as the piecewise ``or`` operation if both have a
+    mask.
+
+    Parameters
+    ----------
+    operation : callable
+        see :meth:`NDArithmeticMixin._arithmetic` parameter description.
+        By default, the ``operation`` will be ignored.
+
+    operand : `NDData`-like instance
+        The second operand wrapped in an instance of the same class as
+        self.
+
+    handle_mask : callable
+        see :meth:`NDArithmeticMixin.add`
+
+    kwds :
+        Additional parameters given to ``handle_mask``.
+
+    Returns
+    -------
+    result_mask : any type
+        If only one mask is present this mask is returned.
+        If neither had a mask ``None`` is returned. Otherwise
+        ``handle_mask`` must create (and copy) the returned mask.
+    """
+    # If only one mask is present we need not bother about any type checks
+    if (
+        self.mask is None and operand is not None and operand.mask is None
+    ) or handle_mask is None:
+        return None
+    elif self.mask is None and operand is not None:
+        # Make a copy so there is no reference in the result.
+        return deepcopy(operand.mask)
+    elif operand is None:
+        return deepcopy(self.mask)
+    else:
+        # Now lets calculate the resulting mask (operation enforces copy)
+        return handle_mask(self.mask, operand.mask, **kwds)
+
+
+```
+
+This method looks like it should handle the case where one operand doesn't have a mask properly. 
+
+I'll continue examining the `_arithmetic` method's mask handling. The code suggests a nuanced approach to managing masks during arithmetic operations. It appears to have different strategies for handling masks depending on the presence of a mask handler and the existing masks of the operands. The method seems designed to be flexible, allowing different mask propagation behaviors based on the specific requirements of the operation.
+
+I'll investigate the test suite to gain insights into how the `np.bitwise_or` operation interacts with these mask handling mechanisms, which might reveal the source of the unexpected behavior.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [1, 50]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Let me search for more specific tests related to mask handling with bitwise operations:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'astropy/nddata/mixins/tests/test_ndarithmetic.py', 'keywords': ['bitwise', 'handle_mask', 'mask.*None']})
+
+
+## Step 9
+
+### 🤔 Thinking
+Let me search for tests related to masks in the test file:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'astropy/nddata/mixins/tests/test_ndarithmetic.py', 'keywords': ['mask', 'None']})
+
+
+## Step 10
+
+### 🤔 Thinking
+Let me look for the specific error mentioned in the issue. The error is "TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'". This suggests that the issue is with the bitwise OR operation between an integer and None.
+
+Let me look for the error by searching for "NoneType" or "bitwise_or":
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'astropy/nddata/', 'keywords': ['bitwise_or', 'NoneType']})
+
+
+## Step 11
+
+### 🤔 Thinking
+The error is happening at runtime when the user calls `np.bitwise_or` on masks. Let me look more carefully at the `_arithmetic_mask` method and see if there's an issue with how it handles the case where one operand doesn't have a mask.
+
+Looking at the error again: "TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'" 
+
+This suggests that the issue is in the `_arithmetic_mask` method when the `handle_mask` callable (which is `np.bitwise_or`) is applied to `self.mask` and `operand.mask`, but one of them is None.
+
+Let me look at the `_arithmetic_mask` method again:
+
+
+
+```python
+def _arithmetic_mask(self, operation, operand, handle_mask, axis=None, **kwds):
+    # If only one mask is present we need not bother about any type checks
+    if (
+        self.mask is None and operand is not None and operand.mask is None
+    ) or handle_mask is None:
+        return None
+    elif self.mask is None and operand is not None:
+        # Make a copy so there is no reference in the result.
+        return deepcopy(operand.mask)
+    elif operand is None:
+        return deepcopy(self.mask)
+    else:
+        # Now lets calculate the resulting mask (operation enforces copy)
+        return handle_mask(self.mask, operand.mask, **kwds)
+
+
+```
+
+The issue is in the last `else` clause. It calls `handle_mask(self.mask, operand.mask, **kwds)` without checking if either `self.mask` or `operand.mask` is None. The problem is that the logic is checking these conditions:
+
+
+1. If both masks are None -> return None
+
+2. If self.mask is None and operand has mask -> return operand.mask  
+
+
+3. If operand is None -> return self.mask
+
+4. else -> call handle_mask on both masks
+
+I see a critical gap in the method's logic. The current implementation doesn't properly handle scenarios where one mask is None while the other exists. This creates a runtime error when attempting to apply bitwise operations between masks with mismatched None/non-None states. The method needs a more robust approach to handle partial mask scenarios.
+
+### 🎯 Action
+ask_repository_agent({'query': "Can you explain how the _arithmetic_mask method in NDArithmeticMixin handles the case where one operand has a mask and the other doesn't? What's the issue with the current logic?"})
+
+
+## Step 12
+
+### 🤔 Thinking
+That's helpful, but I think there's actually an issue with the repository agent's analysis. Looking at the actual code, the line after `elif self.mask is None and operand is not None:` is:
+
+
+
+```python
+# Make a copy so there is no reference in the result.
+return deepcopy(operand.mask)
+
+
+```
+
+So that part is actually correct. Let me look at the code again and think through the problem:
+
+
+1. The issue is that when `self.mask` is not None and `operand.mask` is None, the code falls through to the `else` block
+
+2. In the `else` block, it calls `handle_mask(self.mask, operand.mask, **kwds)` 
+
+3. But `operand.mask` is None, so this becomes `handle_mask(self.mask, None, **kwds)`
+
+4. When `handle_mask` is `np.bitwise_or`, this becomes `np.bitwise_or(self.mask, None)`
+
+5. This causes the TypeError because you can't do bitwise OR between an array and None
+
+The problem is that the logic is missing the case where `self.mask` is not None and `operand.mask` is None. Let me understand this better by looking at the logic more carefully.
+
+Looking at the tests from the issue description:
+- `nref_mask.multiply(1., handle_mask=np.bitwise_or)` fails
+- `nref_mask.multiply(nref_nomask, handle_mask=np.bitwise_or)` fails
+
+In both cases, `self.mask` is not None (from nref_mask), but the operand mask is None (from the constant 
+1. and from nref_nomask).
+
+Looking at the current conditions again:
+
+1. `(self.mask is None and operand is not None and operand.mask is None) or handle_mask is None` - This is for when both masks are None or handle_mask is None
+
+
+2. `self.mask is None and operand is not None` - This is for when self.mask is None but operand has a mask
+
+3. `operand is None` - This is for when operand is None (collapse operations)
+
+4. `else` - This is for when both masks exist
+
+I see the nuanced condition needs refinement. When a constant like 1.0 is passed, `operand` is actually a scalar, which means the type checking needs careful handling. The mask logic requires distinguishing between scalar values and array-like objects with potential masks.
+
+The key insight is creating a robust condition that handles various input types while preserving the intended mask manipulation logic. I'll need to trace how different input types interact with the mask handling mechanism.
+
+### 🎯 Action
+ask_repository_agent({'query': 'When calling nref_mask.multiply(1.0, handle_mask=np.bitwise_or), what is the operand object that gets passed to _arithmetic_mask? Does it have a mask attribute?'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Perfect! Now I understand the issue. When you call `nref_mask.multiply(1.0, handle_mask=np.bitwise_or)`, the `1.0` gets converted to an `NDDataRef(1.0)` object, which has `mask=None`. 
+
+So in `_arithmetic_mask`, we have:
+- `self.mask` = the mask from `nref_mask` (not None)
+- `operand.mask` = None (from the `NDDataRef(1.0)`)
+
+The current logic:
+
+1. `(self.mask is None and operand is not None and operand.mask is None) or handle_mask is None` - This is False because `self.mask` is not None
+
+2. `self.mask is None and operand is not None` - This is False because `self.mask` is not None
+
+3. `operand is None` - This is False because `operand` is not None
+
+4. `else` - This executes and calls `handle_mask(self.mask, operand.mask, **kwds)` which is `np.bitwise_or(self.mask, None)` causing the error
+
+The fix is to add a condition to handle the case where `self.mask` is not None and `operand.mask` is None. In this case, we should return `deepcopy(self.mask)` because when one operand has no mask, the result should just be the existing mask.
+
+Let me double-check this understanding by looking at the logic one more time and by checking if there are any relevant tests.
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'astropy/nddata/tests/', 'keywords': ['test.*mask.*multiply', 'test.*multiply.*mask', 'bitwise_or']})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me check if there are existing tests that cover this case by looking at the broader tests:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'astropy/nddata/', 'keywords': ['multiply.*mask', 'mask.*None', 'operand.*mask']})
+
+
+## Step 15
+
+### 🤔 Thinking
+Let me look at the test file to see if there are any tests that might reveal the expected behavior:
+
+### 🎯 Action
+search_files_by_keywords({'directory': 'astropy/nddata/mixins/tests/test_ndarithmetic.py', 'keywords': ['multiply', 'mask']})
+
+
+## Step 16
+
+### 🤔 Thinking
+Let me look at the broader test file to understand better:
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [1000, 1200]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Let me see what happens after line 1200 with the mask function tests:
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [1200, 1400]})
+
+
+## Step 18
+
+### 🤔 Thinking
+Let me check the rest of the file:
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [1200, 1312]})
+
+
+## Step 19
+
+### 🤔 Thinking
+I notice that the test file shows that there are tests for mask functions, but I don't see any specific test for the `np.bitwise_or` case with one mask being None.
+
+Let me create a reproduction script to verify the issue described in the problem statement:
+
+### 🎯 Action
+think({'thought': "Now I have enough information to analyze the issue. Let me organize what I've learned:\n\n
+1. **Problem**: In v5.3, NDDataRef mask propagation fails when one operand doesn't have a mask and `handle_mask=np.bitwise_or` is used.\n\n
+2. **Root Cause**: In the `_arithmetic_mask` method, when `self.mask` is not None but `operand.mask` is None, the code falls through to the `else` clause which calls `handle_mask(self.mask, operand.mask, **kwds)`. This becomes `np.bitwise_or(self.mask, None)` which causes a TypeError.\n\n
+3. **Current Logic Issue**: The conditions in `_arithmetic_mask` don't handle the case where `self.mask` is not None and `operand.mask` is None (when operand is not None). The logic misses this case:\n   - Case 1: Both masks are None or handle_mask is None → return None\n   - Case 2: self.mask is None and operand is not None → return operand.mask\n   - Case 3: operand is None → return self.mask  \n   - Case 4: else → call handle_mask on both masks (THIS IS THE PROBLEM)\n\n
+4. **Missing Case**: Case 4 should have additional logic to handle when `self.mask` is not None and `operand.mask` is None. In this case, the result should be `self.mask` (since the operand has no mask to combine with).\n\n
+5. **Expected Behavior**: When one operand has no mask, the existing mask should be copied to the result, not combined with None.\n\nLet me provide a comprehensive analysis now."})
+
+
+## Step 20
+
+### 🤔 Thinking
+Now I need to explore the repository more thoroughly to understand the root cause analysis steps mentioned in the dev knowledge. Let me check the current behavior and the expected behavior.
+
+### 🎯 Action
+view_file_content({'file_name': 'astropy/nddata/mixins/ndarithmetic.py', 'view_range': [485, 530]})
+
+
+## Step 21
+
+### 🤔 Thinking
+Now I can see the issue clearly. Let me trace through the logic:
+
+
+1. Line 516-518: `if (self.mask is None and operand is not None and operand.mask is None) or handle_mask is None:`
+   - This condition checks if BOTH masks are None OR if handle_mask is None
+   - It returns None in both cases
+
+
+2. Line 520: `elif self.mask is None and operand is not None:`
+   - This handles the case where self.mask is None but operand might have a mask
+   - It returns a copy of operand.mask
+
+
+3. Line 523: `elif operand is None:`
+   - This handles collapse operations where operand is None
+   - It returns a copy of self.mask
+
+
+4. Line 525-527: `else:`
+   - This is the fallback case that handles when both masks exist
+   - It calls handle_mask(self.mask, operand.mask, **kwds)
+
+The issue is that the logic is missing the case where:
+- self.mask is NOT None AND 
+- operand is NOT None AND
+- operand.mask IS None
+
+In this case, the code falls through to the else clause and tries to call handle_mask(self.mask, None, **kwds), which fails when handle_mask is np.bitwise_or because you can't do bitwise operations with None.
+
+The fix is to add another condition to handle this case. According to the docstring, "If only one mask was present this mask is returned", so we should return deepcopy(self.mask) in this case.
+
+Let me now analyze this fully to provide the issue analysis.
+
+### 📋 Conclusion
+<observation>
+
+1. Found the root cause of the issue in the `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py`. The logic is missing a case where `self.mask` is not None but `operand.mask` is None.
+
+
+2. Alternative action could have been to look at the git history to understand what changed between v5.2 and v5.3 that broke this functionality.
+
+
+3. Next action: Provide a comprehensive issue analysis based on the findings.
+</observation>
+
+Based on my exploration of the repository, I can now provide a comprehensive analysis of the issue:
+
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "In v5.3, NDDataRef mask propagation fails when one operand doesn't have a mask and `handle_mask=np.bitwise_or` is used. The issue occurs because the `_arithmetic_mask` method attempts to perform bitwise operations between an array mask and None, causing a TypeError."
+    - status: "yes"
+  </problem_statement>
+
+  <root_cause>
+    - **Root cause**: The `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py` (lines 485-527) has incomplete conditional logic that fails to handle the case where `self.mask` is not None but `operand.mask` is None (when operand is not None). The current logic checks:
+      
+1. Both masks are None OR handle_mask is None → return None
+      
+2. self.mask is None and operand is not None → return operand.mask
+      
+3. operand is None → return self.mask
+      
+4. else → call handle_mask(self.mask, operand.mask, **kwds)
+
+    The missing case is when `self.mask` is not None AND `operand.mask` is None (when operand is not None). In this scenario, the code falls through to the else clause and attempts to call `handle_mask(self.mask, None, **kwds)`, which fails when `handle_mask` is `np.bitwise_or` because bitwise operations cannot be performed between an array and None.
+  </root_cause>
+
+  <current_behavior>
+    - **Current behavior**: The `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py` (lines 485-527) processes mask combinations during arithmetic operations. When one operand has a mask and the other doesn't (e.g., when multiplying an NDDataRef with a mask by a scalar or another NDDataRef without a mask), the method incorrectly falls through to the else clause and attempts to call the handle_mask function with None as one of the arguments.
+
+    - **Key files affected**: 
+      - `astropy/nddata/mixins/ndarithmetic.py` (main implementation)
+      - `astropy/nddata/nddata_withmixins.py` (NDDataRef definition)
+
+    - **Current implementation**: The conditional logic misses the case where self.mask exists but operand.mask is None, causing a TypeError when handle_mask functions like np.bitwise_or are used.
+
+    - **Existing limitations**: The implementation works correctly when both operands have masks or when self.mask is None, but fails when self.mask is not None and operand.mask is None.
+  </current_behavior>
+
+  <expected_behavior>
+    - **Expected behavior**: When one operand has a mask and the other doesn't, the mask from the operand that has it should be copied to the result. This aligns with the docstring which states "If only one mask was present this mask is returned."
+
+    - **Affected files**:
+      - `astropy/nddata/mixins/ndarithmetic.py` - needs additional conditional logic
+      - Tests should be added to verify the fix works correctly
+
+    - **Specific behavioral improvements**:
+      - Add a conditional branch in `_arithmetic_mask` to handle the case where `self.mask` is not None and `operand.mask` is None
+      - When this case is detected, return `deepcopy(self.mask)` instead of calling the handle_mask function
+      - This ensures that mask propagation works correctly regardless of which operand has a mask
+      - The fix should maintain backward compatibility with existing code while resolving the TypeError
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 1>
+
+<problem_decoder 2>
+## Step 1
+
+### 🤔 Thinking
+Let me start by understanding the issue:
+
+
+1. The problem is about NDDataRef mask propagation when one operand doesn't have a mask
+
+2. In v5.3, this fails with a TypeError when using `handle_mask=np.bitwise_or`
+
+3. This works in v5.2 but not in v5.3
+
+4. The error is: "TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'"
+
+The issue seems to be that when one operand doesn't have a mask, it's being treated as None, and then when the bitwise_or operation tries to operate on an integer and None, it fails.
+
+Let me start by exploring the repository structure to understand the codebase.
+
+### 👁️ Observation
+I'll analyze this issue step by step. First, let me explore the repository structure to understand the codebase.
+
+### 🎯 Action
+view_directory({'dir_path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+I can see the astropy package structure. The issue is related to NDDataRef, which should be in the `astropy/nddata/` directory. Let me explore that directory to understand the structure.
+
+### 👁️ Observation
+<observation>
+
+1. Found the root directory structure of the astropy package
+
+2. The issue is related to NDDataRef which should be in astropy/nddata/
+
+3. Next action: Explore the nddata directory to understand the structure and find NDDataRef
+</observation>
+
+### 🎯 Action
+view_directory({'dir_path': './astropy/nddata'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Great! I can see the nddata directory structure. Now let me search for NDDataRef to find where it's defined. Based on the file structure, it might be in `nddata.py` or `nddata_withmixins.py`.
+
+### 👁️ Observation
+<observation>
+
+1. Found the nddata directory structure with various files
+
+2. NDDataRef should be defined in one of the core files like nddata.py or nddata_withmixins.py
+
+3. Next action: Search for NDDataRef to find its definition
+</observation>
+
+### 🎯 Action
+search_files_by_keywords({'directory': './astropy/nddata', 'keywords': ['NDDataRef']})
+
+
+## Step 4
+
+### 🤔 Thinking
+Perfect! I found NDDataRef. It's primarily defined in `nddata_withmixins.py` (lines 13-45) and is referenced in `nddata.py` (line 118). Let me check the definition in `nddata_withmixins.py` first.
+
+### 👁️ Observation
+<observation>
+
+1. Found NDDataRef is defined in nddata_withmixins.py (lines 13-45)
+
+2. It's also referenced in nddata.py and used in various tests
+
+3. Next action: Examine the NDDataRef definition in nddata_withmixins.py
+</observation>
+
+### 🎯 Action
+view_file_content({'file_name': './astropy/nddata/nddata_withmixins.py'})
+
+
+## Step 5
+
+### 🤔 Thinking
+Now I can see that NDDataRef is a class that inherits from NDArithmeticMixin, NDIOMixin, NDSlicingMixin, and NDData. The issue is related to mask propagation in arithmetic operations (like multiply), so I should examine the NDArithmeticMixin class. Let me also look at the error message mentioned in the issue to understand the exact problem.
+
+The error is: "TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'"
+
+This happens specifically when doing operations like multiply with `handle_mask=np.bitwise_or` when one operand has a mask and the other doesn't. Let me examine the NDArithmeticMixin.
+
+### 👁️ Observation
+<observation>
+
+1. Found that NDDataRef inherits from NDArithmeticMixin, NDIOMixin, NDSlicingMixin, and NDData
+
+2. The arithmetic operations (like multiply) come from NDArithmeticMixin
+
+3. The error happens during mask propagation with bitwise_or when one operand doesn't have a mask
+
+4. Next action: Examine NDArithmeticMixin to understand the mask handling logic
+</observation>
+
+### 🎯 Action
+view_file_content({'file_name': './astropy/nddata/mixins/ndarithmetic.py'})
+
+
+## Step 6
+
+### 🤔 Thinking
+Now I can see the issue! The problem is in the `_arithmetic_mask` method (lines 485-527). Let me look at it more closely:
+
+
+
+```python
+def _arithmetic_mask(self, operation, operand, handle_mask, axis=None, **kwds):
+    """
+    Calculate the resulting mask.
+
+    This is implemented as the piecewise ``or`` operation if both have a
+    mask.
+
+    Parameters
+    ----------
+    operation : callable
+        see :meth:`NDArithmeticMixin._arithmetic` parameter description.
+        By default, the ``operation`` will be ignored.
+
+    operand : `NDData`-like instance
+        The second operand wrapped in an instance of the same class as
+        self.
+
+    handle_mask : callable
+        see :meth:`NDArithmeticMixin.add`
+
+    kwds :
+        Additional parameters given to ``handle_mask``.
+
+    Returns
+    -------
+    result_mask : any type
+        If only one mask is present this mask is returned.
+        If neither had a mask ``None`` is returned. Otherwise
+        ``handle_mask`` must create (and copy) the returned mask.
+    """
+    # If only one mask is present we need not bother about any type checks
+    if (
+        self.mask is None and operand is not None and operand.mask is None
+    ) or handle_mask is None:
+        return None
+    elif self.mask is None and operand is not None:
+        # Make a copy so there is no reference in the result.
+        return deepcopy(operand.mask)
+    elif operand is None:
+        return deepcopy(self.mask)
+    else:
+        # Now lets calculate the resulting mask (operation enforces copy)
+        return handle_mask(self.mask, operand.mask, **kwds)
+
+
+```
+
+Wait, the issue is not directly visible in this method. 
+
+I'm investigating how numeric constants might be causing problems during arithmetic operations. The method seems to handle mask operations, but there might be an underlying issue with type conversion when working with non-NDData operands like scalar values. Specifically, I'm curious about what happens when trying to multiply a masked array with a constant value using a specific mask handling method.
+
+The code suggests there could be a type compatibility problem when converting operands, especially when one operand is a simple numeric type rather than a full NDData-like object.
+
+### 👁️ Observation
+<observation>
+
+1. Found the NDArithmeticMixin class with the _arithmetic_mask method responsible for mask propagation
+
+2. The issue seems to be in mask handling when one operand is a scalar (constant), which gets converted to NDDataRef(scalar) 
+
+3. The _arithmetic_mask method should handle cases where one operand has no mask, but there might be an issue with how scalars are handled
+
+4. Next action: Look at the NDData constructor to see how it handles scalars and masks
+</observation>
+
+### 🎯 Action
+view_file_content({'file_name': './astropy/nddata/nddata.py', 'view_range': [1, 150]})
+
+
+## Step 7
+
+### 🤔 Thinking
+I need to see more of the NDData constructor to understand how it handles scalar values and masks. Let me continue reading:
+
+### 🎯 Action
+view_file_content({'file_name': './astropy/nddata/nddata.py', 'view_range': [150, 350]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Now I understand the issue better. When a scalar like `1.` is passed to the NDData constructor, it gets converted to an array (line 262: `data = np.array(data, subok=True, copy=False)`). However, the mask is explicitly set to `None` (line 287: `self.mask = mask` where `mask` is None for scalar inputs).
+
+But let me look more carefully at the specific error. The error says: "TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'". This suggests the issue is in the handling of masks when using `np.bitwise_or` as the `handle_mask` function.
+
+Let me check what happens when `np.bitwise_or` is called on a mask (which is an integer array) and `None`. Let me also look for recent changes in the code that might have introduced this issue.
+
+Let me first look at what happens in the `_arithmetic_mask` method when `handle_mask` is `np.bitwise_or`:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './astropy/nddata', 'keywords': ['operand.mask is None', 'bitwise_or']})
+
+
+## Step 9
+
+### 🤔 Thinking
+I found the location. Let me look at the line 517 specifically and surrounding context in the `_arithmetic_mask` method:
+
+### 🎯 Action
+view_file_content({'file_name': './astropy/nddata/mixins/ndarithmetic.py', 'view_range': [510, 530]})
+
+
+## Step 10
+
+### 🤔 Thinking
+Now I see the issue! The problem is in the condition on line 517:
+
+
+
+```python
+if (
+    self.mask is None and operand is not None and operand.mask is None
+) or handle_mask is None:
+    return None
+
+
+```
+
+This condition only returns `None` when BOTH operands have no mask. But what happens if only one operand has no mask? The code falls through to the `else` clause on line 525:
+
+
+
+```python
+else:
+    # Now lets calculate the resulting mask (operation enforces copy)
+    return handle_mask(self.mask, operand.mask, **kwds)
+
+
+```
+
+If `self.mask` is an integer array and `operand.mask` is `None`, then `handle_mask(self.mask, operand.mask, **kwds)` becomes `np.bitwise_or(integer_array, None)`, which causes the error: "TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'"
+
+The logic should handle the case where only one operand has a mask. Let me check what the expected behavior is by looking at other parts of the code.
+
+Let me also search for tests to understand the expected behavior better:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './astropy/nddata/mixins/tests', 'keywords': ['multiply', 'handle_mask', 'bitwise_or']})
+
+
+## Step 11
+
+### 🤔 Thinking
+Great! There are tests for `handle_mask` in the test file. Let me examine these tests to understand the expected behavior:
+
+### 🎯 Action
+view_file_content({'file_name': './astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [1095, 1130]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Let me search for specific tests related to `np.bitwise_or` or operations when one operand doesn't have a mask:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './astropy/nddata/mixins/tests', 'keywords': ['bitwise', 'mask.*None', 'operand.*mask']})
+
+
+## Step 13
+
+### 🤔 Thinking
+Let me look at the test around line 72-1103 to understand mask handling:
+
+### 🎯 Action
+view_file_content({'file_name': './astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [65, 90]})
+
+
+## Step 14
+
+### 🤔 Thinking
+Let me also look at what happens in one of the test functions that specifically test mask operations:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './astropy/nddata/mixins/tests', 'keywords': ['def test.*mask']})
+
+
+## Step 15
+
+### 🤔 Thinking
+Let me look at the specific test functions for mask operations:
+
+### 🎯 Action
+view_file_content({'file_name': './astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [268, 310]})
+
+
+## Step 16
+
+### 🤔 Thinking
+Perfect! Now I can see the expected behavior. In the test on lines 272-279, when one mask is `None` and the other is not, the expected behavior is to return the non-None mask:
+
+
+
+```python
+if mask1 is None and mask2 is None:
+    ref_mask = None
+elif mask1 is None:
+    ref_mask = mask2
+elif mask2 is None:
+    ref_mask = mask1
+else:
+    ref_mask = mask1 | mask2
+
+
+```
+
+This confirms that when one operand doesn't have a mask, the result should just copy the existing mask. However, the current implementation in the `_arithmetic_mask` method doesn't handle this correctly when `handle_mask` is `np.bitwise_or`.
+
+Let me look at the definition of the test parameters to understand what `mask1` and `mask2` can be:
+
+### 🎯 Action
+view_file_content({'file_name': './astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [250, 270]})
+
+
+## Step 17
+
+### 🤔 Thinking
+Let me look at the parametrize line to see what mask values are being tested:
+
+### 🎯 Action
+view_file_content({'file_name': './astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [240, 270]})
+
+
+## Step 18
+
+### 🤔 Thinking
+Perfect! Now I can see clearly that the tests include cases where one of the masks is `None` (lines 245-246: `(None, False)` and `(True, None)`), and the expected behavior is to return the non-None mask.
+
+Now I need to understand what the issue is with the current implementation. Let me look at the `_arithmetic_mask` method again and trace through what happens:
+
+
+1. When one operand has a mask and the other doesn't
+
+2. And `handle_mask=np.bitwise_or` is used
+
+The current logic in `_arithmetic_mask` is:
+
+
+```python
+if (self.mask is None and operand is not None and operand.mask is None) or handle_mask is None:
+    return None
+elif self.mask is None and operand is not None:
+    return deepcopy(operand.mask)
+elif operand is None:
+    return deepcopy(self.mask)
+else:
+    return handle_mask(self.mask, operand.mask, **kwds)
+
+
+```
+
+The issue seems to be that when one operand has a mask and the other doesn't, it goes to the `else` clause and calls `handle_mask(self.mask, operand.mask, **kwds)`. But if `operand.mask` is `None`, then this becomes `np.bitwise_or(mask_array, None)` which fails.
+
+But wait, looking at the logic more carefully:
+- If `self.mask is None` and `operand.mask is None`, it returns `None` (line 519)
+- If `self.mask is None` and `operand.mask is not None`, it returns `deepcopy(operand.mask)` (line 522)
+- If `operand is None`, it returns `deepcopy(self.mask)` (line 524)
+- Otherwise, it calls `handle_mask(self.mask, operand.mask, **kwds)` (line 527)
+
+I've discovered a critical gap in the method's logic. When `self.mask` exists but `operand.mask` is `None`, the code lacks a specific handling mechanism. This scenario triggers the default `else` clause, which attempts to apply the mask operation with a `None` value, causing the failure. 
+
+The unhandled case exposes a subtle flaw in the mask processing logic, where the method doesn't gracefully manage situations with asymmetric mask availability. This oversight means the method can't properly resolve mask operations when masks are present on only one side of the computation.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './astropy/nddata', 'keywords': ['operand.mask is None', 'self.mask is None']})
+
+
+## Step 19
+
+### 🤔 Thinking
+Let me check the logic more carefully to understand the exact flow:
+
+### 🎯 Action
+view_file_content({'file_name': './astropy/nddata/mixins/ndarithmetic.py', 'view_range': [515, 527]})
+
+
+## Step 20
+
+### 🤔 Thinking
+Now I can see the issue clearly! The current logic has the following conditions:
+
+
+1. Line 517: `if (self.mask is None and operand is not None and operand.mask is None) or handle_mask is None`
+   - This handles the case when BOTH masks are None OR when handle_mask is None
+
+
+2. Line 520: `elif self.mask is None and operand is not None:`
+   - This handles the case when self.mask is None but operand.mask is not None
+
+
+3. Line 523: `elif operand is None:`
+   - This handles the case when operand is None (probably for reduction operations)
+
+
+4. Line 525: `else:`
+   - This handles all other cases, including when self.mask is not None but operand.mask is None
+
+The bug is that condition 4 (the `else` case) doesn't properly handle the scenario where `self.mask` is not None but `operand.mask` is None. In this case, the expected behavior (based on the tests) should be to return `deepcopy(self.mask)`, but instead it tries to call `handle_mask(self.mask, operand.mask, **kwds)` which becomes `np.bitwise_or(self.mask, None)` and fails.
+
+The fix is to add a specific condition to handle this case. Let me create the reproduction script first to confirm the issue, then provide the fix.
+
+Wait, let me also check the development knowledge to see if this covers the root cause analysis steps.
+
+Looking at the development knowledge:
+
+1. ✓ Identified the data type conversion behavior (when scalar operands are converted to NDData)
+
+2. ✓ Traced array protocol implementation (NDArithmeticMixin)
+
+3. ✓ Checked handling of special data types (masks with None values)
+
+4. ✓ Verified method implementations (particularly _arithmetic_mask)
+
+5. ✓ Tested numerical operations with masked data (through test analysis)
+
+
+6. ✓ Analyzed mask preservation during operations (found the bug)
+
+I've systematically investigated the mask handling mechanism, uncovering a critical edge case in the mask preservation logic. The problem stems from an incomplete condition set that fails to explicitly handle scenarios with asymmetric mask states. By identifying this specific gap, I can now develop a targeted solution to ensure robust mask handling across different operational contexts.
+
+### 🎯 Action
+think({'thought': 'Now I have a complete understanding of the issue. Let me analyze the problem and root cause:\n\n**Problem Analysis:**\n
+1. The issue occurs in NDDataRef when doing arithmetic operations with `handle_mask=np.bitwise_or` where one operand has a mask and the other doesn\'t\n
+2. The error "TypeError: unsupported operand type(s) for |: \'int\' and \'NoneType\'" occurs in the `_arithmetic_mask` method\n
+3. The problem is specific to v5.3, suggesting a recent change introduced this bug\n\n**Root Cause:**\nThe bug is in the `_arithmetic_mask` method in `/astropy/nddata/mixins/ndarithmetic.py` at lines 515-
+527. The current logic has a missing case:\n\n- It handles: `self.mask is None and operand.mask is None` → returns None\n- It handles: `self.mask is None and operand.mask is not None` → returns operand.mask\n- It handles: `operand is None` → returns self.mask\n- **Missing case**: `self.mask is not None and operand.mask is None` → should return self.mask\n\nInstead, this missing case falls through to the `else` clause which calls `handle_mask(self.mask, operand.mask, **kwds)`, which becomes `np.bitwise_or(self.mask, None)` and fails.\n\n**Expected Behavior:**\nAccording to the tests, when one operand has a mask and the other doesn\'t, the result should just copy the existing mask. This is the standard behavior for mask propagation in arithmetic operations.\n\n**Current vs Expected:**\n- Current: `np.bitwise_or(mask_array, None)` → TypeError\n- Expected: `deepcopy(mask_array)` → returns the existing mask\n\nThis covers all the root cause analysis steps from the development knowledge.'})
+
+
+## Step 21
+
+### 🤔 Thinking
+Now I should provide the final issue analysis based on my complete understanding of the problem.
+
+### 📋 Conclusion
+<observation>
+
+1. Identified the root cause of the mask propagation failure in NDDataRef
+
+2. Found the issue is in the `_arithmetic_mask` method which has a missing case for when one operand has a mask and the other doesn't
+
+3. The bug causes `np.bitwise_or(mask_array, None)` to be called, which fails with TypeError
+
+4. Next action: Provide comprehensive issue analysis for the Solution Mapper
+</observation>
+
+<issue_analysis>
+  <problem_statement>
+    - problem_statement: "In astropy v5.3, NDDataRef mask propagation fails when one operand has a mask and the other doesn't, specifically when using `handle_mask=np.bitwise_or`. The error occurs because the `_arithmetic_mask` method in NDArithmeticMixin doesn't properly handle the case where `self.mask` is not None but `operand.mask` is None, causing `np.bitwise_or(mask_array, None)` to be called, which raises TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'."
+    - status: "yes - the issue exists in the current codebase"
+  </problem_statement>
+  <root_cause>
+    The root cause is in the `_arithmetic_mask` method in `./astropy/nddata/mixins/ndarithmetic.py` at lines 515-
+527. The method has incomplete conditional logic that doesn't handle the case where `self.mask` is not None but `operand.mask` is None. The current logic handles:
+    
+1. Both masks are None → returns None
+    
+2. self.mask is None but operand.mask is not None → returns operand.mask
+    
+3. operand is None → returns self.mask
+    
+4. **Missing case**: self.mask is not None but operand.mask is None → should return self.mask
+
+    Instead, case 4 falls through to the `else` clause (line 525-527) which calls `handle_mask(self.mask, operand.mask, **kwds)`. When `handle_mask` is `np.bitwise_or`, this becomes `np.bitwise_or(mask_array, None)` and fails with the TypeError.
+  </root_cause>
+  <current_behavior>
+    The current implementation in `./astropy/nddata/mixins/ndarithmetic.py` in the `_arithmetic_mask` method (lines 515-527) has incomplete conditional logic. When one operand has a mask and the other doesn't, the code falls through to the `else` clause and attempts to call the `handle_mask` function with a mask array and None, causing `np.bitwise_or(mask_array, None)` to fail. This affects all arithmetic operations (multiply, add, subtract, divide) when using `handle_mask=np.bitwise_or` or similar bitwise operations. The issue manifests in operations like `nref_mask.multiply(1., handle_mask=np.bitwise_or)` where the scalar `1.` is converted to `NDDataRef(1.)` with `mask=None`.
+  </current_behavior>
+  <expected_behavior>
+    According to the existing test suite in `./astropy/nddata/mixins/tests/test_ndarithmetic.py` (lines 272-279), when one operand has a mask and the other doesn't, the result should copy the existing mask. The `_arithmetic_mask` method should be modified to explicitly handle the case where `self.mask` is not None but `operand.mask` is None by returning `deepcopy(self.mask)`. This ensures proper mask propagation during arithmetic operations, maintaining consistency with numpy masked array behavior and the expected behavior demonstrated in the test suite.
+  </expected_behavior>
+</issue_analysis>
+</problem_decoder 2>
+
+<solution_mapper 0>
+## Step 1
+
+### 🤔 Thinking
+The user is asking me to act as the Solution Mapper assistant. I need to:
+
+
+1. EXPLORATION: Find the files related to the problem and possible solutions
+
+2. REPRODUCTION: Create a script to reproduce and verify the root cause 
+
+3. FIX ANALYSIS: Based on exploration, develop a solution following the principles given
+
+Let me start with exploration first. From the issue analysis, I can see:
+- The problem is in `astropy/nddata/mixins/ndarithmetic.py` in the `_arithmetic_mask` method (lines 515-527)
+- The issue affects NDDataRef mask propagation when one operand has a mask and the other doesn't
+- The root cause is incomplete conditional logic in the `_arithmetic_mask` method
+
+Let me start by exploring the repository structure and understanding the problem better.
+
+### 👁️ Observation
+I'll help you map a solution to this NDDataRef mask propagation issue. Let me start by exploring the repository structure and understanding the problem in detail.
+
+## 
+1. EXPLORATION
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+I can see the repository structure. Let me look at the `astropy/nddata/` directory to understand the relevant files for this issue.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I can see the relevant files mentioned in the issue analysis:
+- `astropy/nddata/mixins/ndarithmetic.py` - where the main bug is located
+- `astropy/nddata/nddata_withmixins.py` - contains NDDataRef definition
+- `astropy/nddata/nddata.py` - base class with mask handling
+
+Let me start by examining the main file with the bug.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/mixins/ndarithmetic.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Great! I found the main file with the bug. Now I can see the `_arithmetic_mask` method on lines 485-
+527. Let me examine it more closely to understand the issue.
+
+Looking at the current implementation of `_arithmetic_mask`:
+
+
+
+```python
+def _arithmetic_mask(self, operation, operand, handle_mask, axis=None, **kwds):
+    # If only one mask is present we need not bother about any type checks
+    if (
+        self.mask is None and operand is not None and operand.mask is None
+    ) or handle_mask is None:
+        return None
+    elif self.mask is None and operand is not None:
+        # Make a copy so there is no reference in the result.
+        return deepcopy(operand.mask)
+    elif operand is None:
+        return deepcopy(self.mask)
+    else:
+        # Now lets calculate the resulting mask (operation enforces copy)
+        return handle_mask(self.mask, operand.mask, **kwds)
+
+
+```
+
+I can see the issue now. The logic is:
+
+1. If both masks are None or handle_mask is None → return None
+
+2. If self.mask is None and operand.mask is not None → return deepcopy(operand.mask)
+
+3. If operand is None → return deepcopy(self.mask)
+
+4. **else** → return handle_mask(self.mask, operand.mask, **kwds)
+
+The problem is in the else clause. When `self.mask` is not None but `operand.mask` is None (and operand is not None), it falls through to the else clause and calls `handle_mask(self.mask, operand.mask, **kwds)` which becomes `handle_mask(self.mask, None, **kwds)`. When `handle_mask` is `np.bitwise_or`, this becomes `np.bitwise_or(self.mask, None)` which fails.
+
+I'll investigate the NDDataRef class to gain more insights into its structure and potential interactions with the mask handling method.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/nddata_withmixins.py'})
+
+
+## Step 5
+
+### 🤔 Thinking
+Good! So NDDataRef is a class that inherits from NDArithmeticMixin and NDData. Let me also check the NDData base class to understand the mask handling better.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/nddata.py', 'view_range': [1, 100]})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me look at the test files to understand better how mask handling is supposed to work and what the expected behavior should be.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './astropy/nddata/mixins/tests/', 'keywords': ['test_ndarithmetic', '_arithmetic_mask', 'mask', 'handle_mask']})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me check the test file to understand the expected behavior better.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [270, 290]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Perfect! This shows the expected behavior. The test logic at lines 272-279 clearly shows what should happen:
+- If both masks are None → result mask is None
+- If mask1 is None → result mask is mask2
+- If mask2 is None → result mask is mask1
+- Otherwise → result mask is mask1 | mask2
+
+This confirms what the issue analysis already identified. Let me look at more test details to understand the current test structure.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [1090, 1130]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Now let me look at more test details to understand if there are any tests that use handle_mask=np.bitwise_or specifically:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './astropy/nddata/mixins/tests/test_ndarithmetic.py', 'keywords': ['np.bitwise_or', 'bitwise_or', 'handle_mask.*bitwise']})
+
+
+## Step 10
+
+### 🤔 Thinking
+It seems like the tests don't specifically test np.bitwise_or. Let me check if there are any references to it in the issue description or look at how arithmetic operations with scalars are handled.
+
+### 🎯 Action
+ask_repository_agent({'query': 'How does _prepare_then_do_arithmetic handle scalar operands? When I call nref_mask.multiply(1., handle_mask=np.bitwise_or), what happens to the scalar 
+1. and how does it get a mask attribute?'})
+
+
+## Step 11
+
+### 🤔 Thinking
+The repository agent says that when the scalar is converted to NDDataRef, it should have `mask=None` by default. However, the repository agent seems to be saying the expected behavior is that it should work and give "first-found" behavior. 
+
+But the issue is that the current implementation doesn't handle this case properly. Let me look at some more examples of how the scalar conversion works.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/mixins/ndarithmetic.py', 'view_range': [720, 730]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Now I understand. The scalar `1.` gets converted to `cls(operand2)` where `cls` is `NDDataRef`, so it becomes `NDDataRef(1.)`. Since no mask is provided, the mask will be `None`.
+
+Now I have a clear understanding of the issue. Let me create a reproduction script to confirm the issue and then analyze the fix.
+
+### 👁️ Observation
+## 
+2. REPRODUCTION
+
+Let me create a reproduction script to verify the issue:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './reproduction.py', 'file_text': '#!/usr/bin/env python3\n"""\nReproduction script for NDDataRef mask propagation issue.\nDemonstrates the TypeError when using handle_mask=np.bitwise_or with \noperands where one has a mask and the other doesn\'t.\n"""\n\nimport numpy as np\nfrom astropy.nddata import NDDataRef\n\ndef test_mask_propagation():\n    """Test mask propagation in various scenarios."""\n    \n    print("=== NDDataRef mask propagation test ===")\n    \n    # Setup test data\n    array = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]])\n    mask = np.array([[0, 1, 64], [8, 0, 1], [2, 1, 0]])\n    \n    nref_nomask = NDDataRef(array)\n    nref_mask = NDDataRef(array, mask=mask)\n    \n    print(f"nref_nomask.mask: {nref_nomask.mask}")\n    print(f"nref_mask.mask:\\n{nref_mask.mask}")\n    \n    # Test cases\n    test_cases = [\n        ("no mask * no mask (nref_nomask.multiply(nref_nomask))", lambda: nref_nomask.multiply(nref_nomask, handle_mask=np.bitwise_or)),\n        ("no mask * scalar (nref_nomask.multiply(1.))", lambda: nref_nomask.multiply(1., handle_mask=np.bitwise_or)),\n        ("mask * mask (nref_mask.multiply(nref_mask))", lambda: nref_mask.multiply(nref_mask, handle_mask=np.bitwise_or)),\n        ("mask * scalar (nref_mask.multiply(1.))", lambda: nref_mask.multiply(1., handle_mask=np.bitwise_or)),\n        ("mask * no mask (nref_mask.multiply(nref_nomask))", lambda: nref_mask.multiply(nref_nomask, handle_mask=np.bitwise_or)),\n    ]\n    \n    for description, operation in test_cases:\n        print(f"\\n--- Testing: {description} ---")\n        try:\n            result = operation()\n            print(f"SUCCESS: result.mask = {result.mask}")\n        except Exception as e:\n            print(f"ERROR: {type(e).__name__}: {e}")\n\nif __name__ == "__main__":\n    test_mask_propagation()'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Now let me run the reproduction script to confirm the issue:
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 14
+
+### 🤔 Thinking
+Perfect! I've successfully reproduced the issue. The error occurs exactly as described in the issue:
+- `mask * scalar` (nref_mask.multiply(1.)) fails with TypeError
+- `mask * no mask` (nref_mask.multiply(nref_nomask)) fails with TypeError
+
+The working cases are:
+- `no mask * no mask` → result.mask = None
+- `no mask * scalar` → result.mask = None  
+- `mask * mask` → result.mask = [mask array]
+
+The failing cases are:
+- `mask * scalar` → TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'
+- `mask * no mask` → TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'
+
+Now let me analyze the fix needed.
+
+### 👁️ Observation
+<observation>
+
+1. Successfully reproduced the exact issue described in the GitHub issue
+
+2. The error occurs when one operand has a mask and the other doesn't, specifically when using `handle_mask=np.bitwise_or`
+
+3. The issue is in the `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py` at lines 515-527
+
+4. Alternative approach could have been to test with different handle_mask functions, but np.bitwise_or is the specific case causing the TypeError
+
+5. Next action: Analyze the fix needed in the _arithmetic_mask method
+</observation>
+
+## 
+3. FIX ANALYSIS
+
+Now let me analyze exactly what needs to be fixed in the `_arithmetic_mask` method:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/mixins/ndarithmetic.py', 'view_range': [515, 527]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Let me analyze the current logic and identify the missing case:
+
+Current logic:
+
+1. Line 516-519: If both masks are None OR handle_mask is None → return None
+
+2. Line 520-522: If self.mask is None and operand is not None → return deepcopy(operand.mask)
+
+3. Line 523-524: If operand is None → return deepcopy(self.mask) 
+
+4. Line 525-527: **else** → return handle_mask(self.mask, operand.mask, **kwds)
+
+The issue is that the **else** clause (lines 525-527) is reached when:
+- `self.mask` is not None
+- `operand` is not None 
+- `operand.mask` is None
+
+This case is missing a specific check. We need to add a condition to handle the case where `self.mask` is not None but `operand.mask` is None.
+
+According to the test logic from lines 272-279 in the test file:
+- If mask1 is None → result should be mask2
+- If mask2 is None → result should be mask1
+- If both are not None → result should be mask1 | mask2
+
+Based on this, the missing case should return `deepcopy(self.mask)` when `self.mask` is not None but `operand.mask` is None.
+
+Let me implement the fix:
+
+### 🎯 Action
+think({'thought': "Let me analyze the fix needed for the `_arithmetic_mask` method:\n\n**Root Cause Analysis:**\nThe current logic in lines 515-527 has incomplete conditional logic. The issue is that when:\n- `self.mask` is not None AND\n- `operand` is not None AND  \n- `operand.mask` is None\n\nThe code falls through to the else clause and calls `handle_mask(self.mask, operand.mask, **kwds)` which becomes `handle_mask(self.mask, None, **kwds)`. When `handle_mask=np.bitwise_or`, this becomes `np.bitwise_or(self.mask, None)` which fails.\n\n**Fix Analysis:**\nFollowing the minimal viable change principle, I need to add a specific conditional check for the missing case before the else clause. The fix should be surgical and targeted.\n\n**Expected Logic (based on test suite):**\n- If both masks are None OR handle_mask is None → return None\n- If self.mask is None and operand.mask is not None → return deepcopy(operand.mask)\n- If operand is None → return deepcopy(self.mask)\n- **NEW CASE**: If self.mask is not None and operand.mask is None → return deepcopy(self.mask)\n- Otherwise (both masks are not None) → return handle_mask(self.mask, operand.mask, **kwds)\n\n**Implementation:**\nI need to add a new conditional check:\n```python\nelif operand is not None and operand.mask is None:\n    return deepcopy(self.mask)\n```\n\nThis should be added after line 524 and before the current else clause.\n\n**Reasoning:**\n
+1. **Minimal Change**: Only adds the missing conditional case, doesn't change existing logic\n
+2. **Follows Existing Patterns**: Uses the same deepcopy pattern as other conditional branches  \n
+3. **Preserves Interfaces**: Doesn't change method signature or return types\n
+4. **Surgical Fix**: Addresses the exact root cause without broader refactoring\n\nThis fix will ensure that when `self.mask` is not None but `operand.mask` is None, the method returns a deep copy of `self.mask` instead of falling through to the else clause that tries to call `handle_mask` with a None operand."})
+
+
+## Step 16
+
+### 🤔 Thinking
+Great! Now I have a clear understanding of the fix. The solution is to add a new conditional check for the missing case. Let me review the fix once more to make sure it's correct:
+
+**Current logic:**
+
+
+```python
+if (self.mask is None and operand is not None and operand.mask is None) or handle_mask is None:
+    return None
+elif self.mask is None and operand is not None:
+    return deepcopy(operand.mask)
+elif operand is None:
+    return deepcopy(self.mask)
+else:
+    return handle_mask(self.mask, operand.mask, **kwds)
+
+
+```
+
+**Fixed logic:**
+
+
+```python
+if (self.mask is None and operand is not None and operand.mask is None) or handle_mask is None:
+    return None
+elif self.mask is None and operand is not None:
+    return deepcopy(operand.mask)
+elif operand is None:
+    return deepcopy(self.mask)
+elif operand is not None and operand.mask is None:  # NEW CASE
+    return deepcopy(self.mask)
+else:
+    return handle_mask(self.mask, operand.mask, **kwds)
+
+
+```
+
+This follows the expected behavior:
+- `mask1 is None` → `mask2` (line 520-522)
+- `mask2 is None` → `mask1` (new line to be added)
+- Both not None → `mask1 | mask2` (else clause, line 525-527)
+
+The fix is minimal, targeted, and follows existing code patterns. It's a surgical fix that addresses the exact root cause without changing any other logic or interfaces.
+
+### 📋 Conclusion
+Based on my exploration and analysis, I can now provide a comprehensive solution to this mask propagation issue.
+
+## **Root Cause Analysis**
+
+The root cause is in the `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py` at lines 515-
+527. The method has incomplete conditional logic that fails to handle the case where `self.mask` is not None but `operand.mask` is None.
+
+**Current Logic Flow:**
+
+1. If both masks are None OR handle_mask is None → return None
+
+2. If self.mask is None and operand.mask is not None → return deepcopy(operand.mask)
+
+3. If operand is None → return deepcopy(self.mask)
+
+4. **Missing case**: If self.mask is not None and operand.mask is None → falls through to else clause
+
+5. else → return handle_mask(self.mask, operand.mask, **kwds)
+
+The missing case causes the code to call `handle_mask(self.mask, None, **kwds)`, which becomes `np.bitwise_or(self.mask, None)` when `handle_mask=np.bitwise_or`, resulting in a TypeError.
+
+## **Fix Analysis**
+
+Following the minimal viable change principle, I need to add a specific conditional check for the missing case. The fix should be surgical and targeted, addressing only the exact location where the problem occurs.
+
+**Expected Behavior (based on test suite):**
+According to the test logic in `test_ndarithmetic.py` lines 272-279:
+- If mask1 is None → result should be mask2
+- If mask2 is None → result should be mask1
+- If both are not None → result should be mask1 | mask2
+
+**Solution:**
+Add a new conditional branch before the else clause to handle the case where `self.mask` is not None but `operand.mask` is None, returning `deepcopy(self.mask)`.
+
+This solution:
+- Follows the minimal viable change principle
+- Preserves existing interfaces and data flow
+- Uses existing code patterns (deepcopy)
+- Addresses the exact root cause without broader refactoring
+- Maintains backward compatibility
+
+<code_change_plan>
+**Solution Description:**
+The fix involves adding a missing conditional branch in the `_arithmetic_mask` method to handle the case where `self.mask` is not None but `operand.mask` is None. This prevents the code from falling through to the else clause that tries to call `handle_mask` with a None operand, which causes a TypeError when `handle_mask=np.bitwise_or`.
+
+**Root Cause:** The `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py` has incomplete conditional logic that fails to handle the case where one operand has a mask and the other doesn't, causing `np.bitwise_or(mask_array, None)` to be called.
+
+**Fix Analysis:** The solution adds a new conditional check `elif operand is not None and operand.mask is None:` that returns `deepcopy(self.mask)` before the else clause. This ensures that when `self.mask` is not None but `operand.mask` is None, the method returns a deep copy of `self.mask` instead of trying to call `handle_mask` with a None operand.
+
+**Reproduction Script:** `./reproduction.py`
+**Current Output:** 
+
+
+```
+--- Testing: mask * scalar (nref_mask.multiply(1.)) ---
+ERROR: TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'
+
+--- Testing: mask * no mask (nref_mask.multiply(nref_nomask)) ---
+ERROR: TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'
+
+
+```
+
+**Expected Output:** 
+
+
+```
+--- Testing: mask * scalar (nref_mask.multiply(1.)) ---
+SUCCESS: result.mask = [[ 0  1 64]
+ [ 8  0  1]
+ [ 2  1  0]]
+
+--- Testing: mask * no mask (nref_mask.multiply(nref_nomask)) ---
+SUCCESS: result.mask = [[ 0  1 64]
+ [ 8  0  1]
+ [ 2  1  0]]
+
+
+```
+
+**File Changes:**
+
+./astropy/nddata/mixins/ndarithmetic.py:
+- Change 1: Add missing conditional branch to handle case where `self.mask` is not None but `operand.mask` is None
+  Location: After line 524 (after the `elif operand is None:` block), before the current `else:` clause
+  Add the following conditional check:
+  
+
+```python
+  elif operand is not None and operand.mask is None:
+      # Make a copy so there is no reference in the result.
+      return deepcopy(self.mask)
+  
+
+```
+  Reasoning: This handles the missing case where `self.mask` exists but `operand.mask` is None, preventing the code from falling through to the else clause that tries to call `handle_mask(self.mask, None, **kwds)`. The fix follows the same pattern as the existing conditional branches, uses deepcopy for consistency, and matches the expected behavior from the test suite where if one mask is None, the other mask should be returned.
+</code_change_plan>
+</solution_mapper 0>
+
+<problem_solver 0>
+## Step 1
+
+### 🤔 Thinking
+The user is asking me to act as the Solution Mapper assistant. I need to:
+
+
+1. EXPLORATION: Find the files related to the problem and possible solutions
+
+2. REPRODUCTION: Create a script to reproduce and verify the root cause 
+
+3. FIX ANALYSIS: Based on exploration, develop a solution following the principles given
+
+Let me start with exploration first. From the issue analysis, I can see:
+- The problem is in `astropy/nddata/mixins/ndarithmetic.py` in the `_arithmetic_mask` method (lines 515-527)
+- The issue affects NDDataRef mask propagation when one operand has a mask and the other doesn't
+- The root cause is incomplete conditional logic in the `_arithmetic_mask` method
+
+Let me start by exploring the repository structure and understanding the problem better.
+
+### 👁️ Observation
+I'll help you map a solution to this NDDataRef mask propagation issue. Let me start by exploring the repository structure and understanding the problem in detail.
+
+## 
+1. EXPLORATION
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './'})
+
+
+## Step 2
+
+### 🤔 Thinking
+I can see the repository structure. Let me look at the `astropy/nddata/` directory to understand the relevant files for this issue.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/'})
+
+
+## Step 3
+
+### 🤔 Thinking
+Perfect! I can see the relevant files mentioned in the issue analysis:
+- `astropy/nddata/mixins/ndarithmetic.py` - where the main bug is located
+- `astropy/nddata/nddata_withmixins.py` - contains NDDataRef definition
+- `astropy/nddata/nddata.py` - base class with mask handling
+
+Let me start by examining the main file with the bug.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/mixins/ndarithmetic.py'})
+
+
+## Step 4
+
+### 🤔 Thinking
+Great! I found the main file with the bug. Now I can see the `_arithmetic_mask` method on lines 485-
+527. Let me examine it more closely to understand the issue.
+
+Looking at the current implementation of `_arithmetic_mask`:
+
+
+
+```python
+def _arithmetic_mask(self, operation, operand, handle_mask, axis=None, **kwds):
+    # If only one mask is present we need not bother about any type checks
+    if (
+        self.mask is None and operand is not None and operand.mask is None
+    ) or handle_mask is None:
+        return None
+    elif self.mask is None and operand is not None:
+        # Make a copy so there is no reference in the result.
+        return deepcopy(operand.mask)
+    elif operand is None:
+        return deepcopy(self.mask)
+    else:
+        # Now lets calculate the resulting mask (operation enforces copy)
+        return handle_mask(self.mask, operand.mask, **kwds)
+
+
+```
+
+I can see the issue now. The logic is:
+
+1. If both masks are None or handle_mask is None → return None
+
+2. If self.mask is None and operand.mask is not None → return deepcopy(operand.mask)
+
+3. If operand is None → return deepcopy(self.mask)
+
+4. **else** → return handle_mask(self.mask, operand.mask, **kwds)
+
+The problem is in the else clause. When `self.mask` is not None but `operand.mask` is None (and operand is not None), it falls through to the else clause and calls `handle_mask(self.mask, operand.mask, **kwds)` which becomes `handle_mask(self.mask, None, **kwds)`. When `handle_mask` is `np.bitwise_or`, this becomes `np.bitwise_or(self.mask, None)` which fails.
+
+I'll investigate the NDDataRef class to gain more insights into its structure and potential interactions with the mask handling method.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/nddata_withmixins.py'})
+
+
+## Step 5
+
+### 🤔 Thinking
+Good! So NDDataRef is a class that inherits from NDArithmeticMixin and NDData. Let me also check the NDData base class to understand the mask handling better.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/nddata.py', 'view_range': [1, 100]})
+
+
+## Step 6
+
+### 🤔 Thinking
+Let me look at the test files to understand better how mask handling is supposed to work and what the expected behavior should be.
+
+### 🎯 Action
+search_files_by_keywords({'directory': './astropy/nddata/mixins/tests/', 'keywords': ['test_ndarithmetic', '_arithmetic_mask', 'mask', 'handle_mask']})
+
+
+## Step 7
+
+### 🤔 Thinking
+Let me check the test file to understand the expected behavior better.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [270, 290]})
+
+
+## Step 8
+
+### 🤔 Thinking
+Perfect! This shows the expected behavior. The test logic at lines 272-279 clearly shows what should happen:
+- If both masks are None → result mask is None
+- If mask1 is None → result mask is mask2
+- If mask2 is None → result mask is mask1
+- Otherwise → result mask is mask1 | mask2
+
+This confirms what the issue analysis already identified. Let me look at more test details to understand the current test structure.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/mixins/tests/test_ndarithmetic.py', 'view_range': [1090, 1130]})
+
+
+## Step 9
+
+### 🤔 Thinking
+Now let me look at more test details to understand if there are any tests that use handle_mask=np.bitwise_or specifically:
+
+### 🎯 Action
+search_files_by_keywords({'directory': './astropy/nddata/mixins/tests/test_ndarithmetic.py', 'keywords': ['np.bitwise_or', 'bitwise_or', 'handle_mask.*bitwise']})
+
+
+## Step 10
+
+### 🤔 Thinking
+It seems like the tests don't specifically test np.bitwise_or. Let me check if there are any references to it in the issue description or look at how arithmetic operations with scalars are handled.
+
+### 🎯 Action
+ask_repository_agent({'query': 'How does _prepare_then_do_arithmetic handle scalar operands? When I call nref_mask.multiply(1., handle_mask=np.bitwise_or), what happens to the scalar 
+1. and how does it get a mask attribute?'})
+
+
+## Step 11
+
+### 🤔 Thinking
+The repository agent says that when the scalar is converted to NDDataRef, it should have `mask=None` by default. However, the repository agent seems to be saying the expected behavior is that it should work and give "first-found" behavior. 
+
+But the issue is that the current implementation doesn't handle this case properly. Let me look at some more examples of how the scalar conversion works.
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/mixins/ndarithmetic.py', 'view_range': [720, 730]})
+
+
+## Step 12
+
+### 🤔 Thinking
+Now I understand. The scalar `1.` gets converted to `cls(operand2)` where `cls` is `NDDataRef`, so it becomes `NDDataRef(1.)`. Since no mask is provided, the mask will be `None`.
+
+Now I have a clear understanding of the issue. Let me create a reproduction script to confirm the issue and then analyze the fix.
+
+### 👁️ Observation
+## 
+2. REPRODUCTION
+
+Let me create a reproduction script to verify the issue:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './reproduction.py', 'file_text': '#!/usr/bin/env python3\n"""\nReproduction script for NDDataRef mask propagation issue.\nDemonstrates the TypeError when using handle_mask=np.bitwise_or with \noperands where one has a mask and the other doesn\'t.\n"""\n\nimport numpy as np\nfrom astropy.nddata import NDDataRef\n\ndef test_mask_propagation():\n    """Test mask propagation in various scenarios."""\n    \n    print("=== NDDataRef mask propagation test ===")\n    \n    # Setup test data\n    array = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]])\n    mask = np.array([[0, 1, 64], [8, 0, 1], [2, 1, 0]])\n    \n    nref_nomask = NDDataRef(array)\n    nref_mask = NDDataRef(array, mask=mask)\n    \n    print(f"nref_nomask.mask: {nref_nomask.mask}")\n    print(f"nref_mask.mask:\\n{nref_mask.mask}")\n    \n    # Test cases\n    test_cases = [\n        ("no mask * no mask (nref_nomask.multiply(nref_nomask))", lambda: nref_nomask.multiply(nref_nomask, handle_mask=np.bitwise_or)),\n        ("no mask * scalar (nref_nomask.multiply(1.))", lambda: nref_nomask.multiply(1., handle_mask=np.bitwise_or)),\n        ("mask * mask (nref_mask.multiply(nref_mask))", lambda: nref_mask.multiply(nref_mask, handle_mask=np.bitwise_or)),\n        ("mask * scalar (nref_mask.multiply(1.))", lambda: nref_mask.multiply(1., handle_mask=np.bitwise_or)),\n        ("mask * no mask (nref_mask.multiply(nref_nomask))", lambda: nref_mask.multiply(nref_nomask, handle_mask=np.bitwise_or)),\n    ]\n    \n    for description, operation in test_cases:\n        print(f"\\n--- Testing: {description} ---")\n        try:\n            result = operation()\n            print(f"SUCCESS: result.mask = {result.mask}")\n        except Exception as e:\n            print(f"ERROR: {type(e).__name__}: {e}")\n\nif __name__ == "__main__":\n    test_mask_propagation()'})
+
+
+## Step 13
+
+### 🤔 Thinking
+Now let me run the reproduction script to confirm the issue:
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 14
+
+### 🤔 Thinking
+Perfect! I've successfully reproduced the issue. The error occurs exactly as described in the issue:
+- `mask * scalar` (nref_mask.multiply(1.)) fails with TypeError
+- `mask * no mask` (nref_mask.multiply(nref_nomask)) fails with TypeError
+
+The working cases are:
+- `no mask * no mask` → result.mask = None
+- `no mask * scalar` → result.mask = None  
+- `mask * mask` → result.mask = [mask array]
+
+The failing cases are:
+- `mask * scalar` → TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'
+- `mask * no mask` → TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'
+
+Now let me analyze the fix needed.
+
+### 👁️ Observation
+<observation>
+
+1. Successfully reproduced the exact issue described in the GitHub issue
+
+2. The error occurs when one operand has a mask and the other doesn't, specifically when using `handle_mask=np.bitwise_or`
+
+3. The issue is in the `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py` at lines 515-527
+
+4. Alternative approach could have been to test with different handle_mask functions, but np.bitwise_or is the specific case causing the TypeError
+
+5. Next action: Analyze the fix needed in the _arithmetic_mask method
+</observation>
+
+## 
+3. FIX ANALYSIS
+
+Now let me analyze exactly what needs to be fixed in the `_arithmetic_mask` method:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/mixins/ndarithmetic.py', 'view_range': [515, 527]})
+
+
+## Step 15
+
+### 🤔 Thinking
+Let me analyze the current logic and identify the missing case:
+
+Current logic:
+
+1. Line 516-519: If both masks are None OR handle_mask is None → return None
+
+2. Line 520-522: If self.mask is None and operand is not None → return deepcopy(operand.mask)
+
+3. Line 523-524: If operand is None → return deepcopy(self.mask) 
+
+4. Line 525-527: **else** → return handle_mask(self.mask, operand.mask, **kwds)
+
+The issue is that the **else** clause (lines 525-527) is reached when:
+- `self.mask` is not None
+- `operand` is not None 
+- `operand.mask` is None
+
+This case is missing a specific check. We need to add a condition to handle the case where `self.mask` is not None but `operand.mask` is None.
+
+According to the test logic from lines 272-279 in the test file:
+- If mask1 is None → result should be mask2
+- If mask2 is None → result should be mask1
+- If both are not None → result should be mask1 | mask2
+
+Based on this, the missing case should return `deepcopy(self.mask)` when `self.mask` is not None but `operand.mask` is None.
+
+Let me implement the fix:
+
+### 🎯 Action
+think({'thought': "Let me analyze the fix needed for the `_arithmetic_mask` method:\n\n**Root Cause Analysis:**\nThe current logic in lines 515-527 has incomplete conditional logic. The issue is that when:\n- `self.mask` is not None AND\n- `operand` is not None AND  \n- `operand.mask` is None\n\nThe code falls through to the else clause and calls `handle_mask(self.mask, operand.mask, **kwds)` which becomes `handle_mask(self.mask, None, **kwds)`. When `handle_mask=np.bitwise_or`, this becomes `np.bitwise_or(self.mask, None)` which fails.\n\n**Fix Analysis:**\nFollowing the minimal viable change principle, I need to add a specific conditional check for the missing case before the else clause. The fix should be surgical and targeted.\n\n**Expected Logic (based on test suite):**\n- If both masks are None OR handle_mask is None → return None\n- If self.mask is None and operand.mask is not None → return deepcopy(operand.mask)\n- If operand is None → return deepcopy(self.mask)\n- **NEW CASE**: If self.mask is not None and operand.mask is None → return deepcopy(self.mask)\n- Otherwise (both masks are not None) → return handle_mask(self.mask, operand.mask, **kwds)\n\n**Implementation:**\nI need to add a new conditional check:\n```python\nelif operand is not None and operand.mask is None:\n    return deepcopy(self.mask)\n```\n\nThis should be added after line 524 and before the current else clause.\n\n**Reasoning:**\n
+1. **Minimal Change**: Only adds the missing conditional case, doesn't change existing logic\n
+2. **Follows Existing Patterns**: Uses the same deepcopy pattern as other conditional branches  \n
+3. **Preserves Interfaces**: Doesn't change method signature or return types\n
+4. **Surgical Fix**: Addresses the exact root cause without broader refactoring\n\nThis fix will ensure that when `self.mask` is not None but `operand.mask` is None, the method returns a deep copy of `self.mask` instead of falling through to the else clause that tries to call `handle_mask` with a None operand."})
+
+
+## Step 16
+
+### 🤔 Thinking
+Great! Now I have a clear understanding of the fix. The solution is to add a new conditional check for the missing case. Let me review the fix once more to make sure it's correct:
+
+**Current logic:**
+
+
+```python
+if (self.mask is None and operand is not None and operand.mask is None) or handle_mask is None:
+    return None
+elif self.mask is None and operand is not None:
+    return deepcopy(operand.mask)
+elif operand is None:
+    return deepcopy(self.mask)
+else:
+    return handle_mask(self.mask, operand.mask, **kwds)
+
+
+```
+
+**Fixed logic:**
+
+
+```python
+if (self.mask is None and operand is not None and operand.mask is None) or handle_mask is None:
+    return None
+elif self.mask is None and operand is not None:
+    return deepcopy(operand.mask)
+elif operand is None:
+    return deepcopy(self.mask)
+elif operand is not None and operand.mask is None:  # NEW CASE
+    return deepcopy(self.mask)
+else:
+    return handle_mask(self.mask, operand.mask, **kwds)
+
+
+```
+
+This follows the expected behavior:
+- `mask1 is None` → `mask2` (line 520-522)
+- `mask2 is None` → `mask1` (new line to be added)
+- Both not None → `mask1 | mask2` (else clause, line 525-527)
+
+The fix is minimal, targeted, and follows existing code patterns. It's a surgical fix that addresses the exact root cause without changing any other logic or interfaces.
+
+### 👁️ Observation
+Based on my exploration and analysis, I can now provide a comprehensive solution to this mask propagation issue.
+
+## **Root Cause Analysis**
+
+The root cause is in the `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py` at lines 515-
+527. The method has incomplete conditional logic that fails to handle the case where `self.mask` is not None but `operand.mask` is None.
+
+**Current Logic Flow:**
+
+1. If both masks are None OR handle_mask is None → return None
+
+2. If self.mask is None and operand.mask is not None → return deepcopy(operand.mask)
+
+3. If operand is None → return deepcopy(self.mask)
+
+4. **Missing case**: If self.mask is not None and operand.mask is None → falls through to else clause
+
+5. else → return handle_mask(self.mask, operand.mask, **kwds)
+
+The missing case causes the code to call `handle_mask(self.mask, None, **kwds)`, which becomes `np.bitwise_or(self.mask, None)` when `handle_mask=np.bitwise_or`, resulting in a TypeError.
+
+## **Fix Analysis**
+
+Following the minimal viable change principle, I need to add a specific conditional check for the missing case. The fix should be surgical and targeted, addressing only the exact location where the problem occurs.
+
+**Expected Behavior (based on test suite):**
+According to the test logic in `test_ndarithmetic.py` lines 272-279:
+- If mask1 is None → result should be mask2
+- If mask2 is None → result should be mask1
+- If both are not None → result should be mask1 | mask2
+
+**Solution:**
+Add a new conditional branch before the else clause to handle the case where `self.mask` is not None but `operand.mask` is None, returning `deepcopy(self.mask)`.
+
+This solution:
+- Follows the minimal viable change principle
+- Preserves existing interfaces and data flow
+- Uses existing code patterns (deepcopy)
+- Addresses the exact root cause without broader refactoring
+- Maintains backward compatibility
+
+<code_change_plan>
+**Solution Description:**
+The fix involves adding a missing conditional branch in the `_arithmetic_mask` method to handle the case where `self.mask` is not None but `operand.mask` is None. This prevents the code from falling through to the else clause that tries to call `handle_mask` with a None operand, which causes a TypeError when `handle_mask=np.bitwise_or`.
+
+**Root Cause:** The `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py` has incomplete conditional logic that fails to handle the case where one operand has a mask and the other doesn't, causing `np.bitwise_or(mask_array, None)` to be called.
+
+**Fix Analysis:** The solution adds a new conditional check `elif operand is not None and operand.mask is None:` that returns `deepcopy(self.mask)` before the else clause. This ensures that when `self.mask` is not None but `operand.mask` is None, the method returns a deep copy of `self.mask` instead of trying to call `handle_mask` with a None operand.
+
+**Reproduction Script:** `./reproduction.py`
+**Current Output:** 
+
+
+```
+--- Testing: mask * scalar (nref_mask.multiply(1.)) ---
+ERROR: TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'
+
+--- Testing: mask * no mask (nref_mask.multiply(nref_nomask)) ---
+ERROR: TypeError: unsupported operand type(s) for |: 'int' and 'NoneType'
+
+
+```
+
+**Expected Output:** 
+
+
+```
+--- Testing: mask * scalar (nref_mask.multiply(1.)) ---
+SUCCESS: result.mask = [[ 0  1 64]
+ [ 8  0  1]
+ [ 2  1  0]]
+
+--- Testing: mask * no mask (nref_mask.multiply(nref_nomask)) ---
+SUCCESS: result.mask = [[ 0  1 64]
+ [ 8  0  1]
+ [ 2  1  0]]
+
+
+```
+
+**File Changes:**
+
+./astropy/nddata/mixins/ndarithmetic.py:
+- Change 1: Add missing conditional branch to handle case where `self.mask` is not None but `operand.mask` is None
+  Location: After line 524 (after the `elif operand is None:` block), before the current `else:` clause
+  Add the following conditional check:
+  
+
+```python
+  elif operand is not None and operand.mask is None:
+      # Make a copy so there is no reference in the result.
+      return deepcopy(self.mask)
+  
+
+```
+  Reasoning: This handles the missing case where `self.mask` exists but `operand.mask` is None, preventing the code from falling through to the else clause that tries to call `handle_mask(self.mask, None, **kwds)`. The fix follows the same pattern as the existing conditional branches, uses deepcopy for consistency, and matches the expected behavior from the test suite where if one mask is None, the other mask should be returned.
+</code_change_plan>
+
+
+## Step 17
+
+### 👁️ Observation
+Now let me implement the fix.
+
+## 
+1. FIX IMPLEMENTATION
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './astropy/nddata/mixins/ndarithmetic.py', 'old_str': '        elif operand is None:\n            return deepcopy(self.mask)\n        else:\n            # Now lets calculate the resulting mask (operation enforces copy)\n            return handle_mask(self.mask, operand.mask, **kwds)', 'new_str': '        elif operand is None:\n            return deepcopy(self.mask)\n        elif operand is not None and operand.mask is None:\n            # Make a copy so there is no reference in the result.\n            return deepcopy(self.mask)\n        else:\n            # Now lets calculate the resulting mask (operation enforces copy)\n            return handle_mask(self.mask, operand.mask, **kwds)'})
+
+
+## Step 18
+
+### 🤔 Thinking
+Perfect! The fix has been successfully implemented. I've added the missing conditional branch at line 526-528 that handles the case where `operand is not None and operand.mask is None`. This should prevent the code from falling through to the else clause and calling `handle_mask(self.mask, None, **kwds)`.
+
+Now let me run the reproduction script to verify the fix works.
+
+### 👁️ Observation
+## 
+2. VERIFICATION
+
+Let me test the fix with the reproduction script:
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 19
+
+### 🤔 Thinking
+Excellent! The fix is working perfectly. All test cases are now passing:
+
+
+1. `no mask * no mask` → result.mask = None (was already working)
+
+2. `no mask * scalar` → result.mask = None (was already working) 
+
+3. `mask * mask` → result.mask = [mask array] (was already working)
+
+4. `mask * scalar` → result.mask = [mask array] (now fixed!)
+
+5. `mask * no mask` → result.mask = [mask array] (now fixed!)
+
+The two failing cases that were causing TypeError are now working correctly and returning the expected mask from the operand that has a mask. This is exactly the behavior expected based on the test suite logic.
+
+Let me add some edge cases to make sure the fix is comprehensive.
+
+### 👁️ Observation
+Excellent! The fix is working perfectly. Let me add some edge cases to ensure comprehensive coverage:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'str_replace', 'path': './reproduction.py', 'old_str': '    # Test cases\n    test_cases = [\n        ("no mask * no mask (nref_nomask.multiply(nref_nomask))", lambda: nref_nomask.multiply(nref_nomask, handle_mask=np.bitwise_or)),\n        ("no mask * scalar (nref_nomask.multiply(1.))", lambda: nref_nomask.multiply(1., handle_mask=np.bitwise_or)),\n        ("mask * mask (nref_mask.multiply(nref_mask))", lambda: nref_mask.multiply(nref_mask, handle_mask=np.bitwise_or)),\n        ("mask * scalar (nref_mask.multiply(1.))", lambda: nref_mask.multiply(1., handle_mask=np.bitwise_or)),\n        ("mask * no mask (nref_mask.multiply(nref_nomask))", lambda: nref_mask.multiply(nref_nomask, handle_mask=np.bitwise_or)),\n    ]', 'new_str': '    # Test cases\n    test_cases = [\n        ("no mask * no mask (nref_nomask.multiply(nref_nomask))", lambda: nref_nomask.multiply(nref_nomask, handle_mask=np.bitwise_or)),\n        ("no mask * scalar (nref_nomask.multiply(1.))", lambda: nref_nomask.multiply(1., handle_mask=np.bitwise_or)),\n        ("mask * mask (nref_mask.multiply(nref_mask))", lambda: nref_mask.multiply(nref_mask, handle_mask=np.bitwise_or)),\n        ("mask * scalar (nref_mask.multiply(1.))", lambda: nref_mask.multiply(1., handle_mask=np.bitwise_or)),\n        ("mask * no mask (nref_mask.multiply(nref_nomask))", lambda: nref_mask.multiply(nref_nomask, handle_mask=np.bitwise_or)),\n        \n        # Test other operations to ensure fix works across all arithmetic operations\n        ("mask + scalar (nref_mask.add(1.))", lambda: nref_mask.add(1., handle_mask=np.bitwise_or)),\n        ("mask - scalar (nref_mask.subtract(1.))", lambda: nref_mask.subtract(1., handle_mask=np.bitwise_or)),\n        ("mask / scalar (nref_mask.divide(1.))", lambda: nref_mask.divide(1., handle_mask=np.bitwise_or)),\n        \n        # Test scalar operations on the left side\n        ("scalar * mask (NDDataRef(1.).multiply(nref_mask))", lambda: NDDataRef(1.).multiply(nref_mask, handle_mask=np.bitwise_or)),\n        \n        # Test with different masks to ensure it works with various mask types\n        ("mask * zero mask", lambda: nref_mask.multiply(NDDataRef(array, mask=np.zeros_like(mask)), handle_mask=np.bitwise_or)),\n        ("mask * bool mask", lambda: nref_mask.multiply(NDDataRef(array, mask=mask.astype(bool)), handle_mask=np.bitwise_or)),\n    ]'})
+
+
+## Step 20
+
+### 🤔 Thinking
+Now let me run the extended test cases to make sure the fix is comprehensive:
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 21
+
+### 🤔 Thinking
+Excellent! All the extended test cases are passing. The fix is working correctly across:
+
+
+1. All arithmetic operations (multiply, add, subtract, divide)
+
+2. Both left and right side scalar operations
+
+3. Different mask types (integer, boolean, zero masks)
+
+4. All combinations of mask/no-mask scenarios
+
+The last test case (`mask * bool mask`) shows that when both operands have masks, it properly uses the `handle_mask` function (np.bitwise_or) to combine them, which is the expected behavior for the else clause.
+
+Let me run the existing tests to make sure I didn't break anything:
+
+### 👁️ Observation
+Perfect! All extended test cases are passing. Let me run the existing tests to make sure the fix doesn't break anything:
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest astropy/nddata/mixins/tests/test_ndarithmetic.py -v'})
+
+
+## Step 22
+
+### 🤔 Thinking
+Perfect! All 179 tests pass. This confirms that my fix doesn't break any existing functionality. Now let me also run some related tests to ensure I haven't broken anything in the broader nddata functionality:
+
+### 👁️ Observation
+Excellent! All 179 tests pass. Let me also run some related tests to ensure I haven't broken anything in the broader nddata functionality:
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest astropy/nddata/tests/test_nddata.py -v'})
+
+
+## Step 23
+
+### 🤔 Thinking
+Perfect! All NDData tests pass too. Now let me create a simple test to make sure the exact issue from the GitHub issue is fixed:
+
+### 👁️ Observation
+Perfect! All NDData tests pass as well. Let me create a final test to make sure the exact issue from the GitHub issue is fixed:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './test_github_issue.py', 'file_text': '#!/usr/bin/env python3\n"""\nTest script to reproduce the exact GitHub issue examples from the issue description.\n"""\n\nimport numpy as np\nfrom astropy.nddata import NDDataRef\n\ndef test_github_issue_examples():\n    """Test the exact examples from the GitHub issue."""\n    print("=== Testing exact examples from GitHub issue ===")\n    \n    # Setup from issue\n    array = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]])\n    mask = np.array([[0, 1, 64], [8, 0, 1], [2, 1, 0]])\n\n    nref_nomask = NDDataRef(array)\n    nref_mask = NDDataRef(array, mask=mask)\n\n    # Test cases from issue description\n    print("\\n
+1. multiply no mask by constant (no mask * no mask)")\n    result = nref_nomask.multiply(1., handle_mask=np.bitwise_or)\n    print(f"   Result mask: {result.mask}")\n\n    print("\\n
+2. multiply no mask by itself (no mask * no mask)")\n    result = nref_nomask.multiply(nref_nomask, handle_mask=np.bitwise_or)\n    print(f"   Result mask: {result.mask}")\n\n    print("\\n
+3. multiply mask by constant (mask * no mask)")\n    result = nref_mask.multiply(1., handle_mask=np.bitwise_or)\n    print(f"   Result mask:")\n    print(f"   {result.mask}")\n\n    print("\\n
+4. multiply mask by itself (mask * mask)")\n    result = nref_mask.multiply(nref_mask, handle_mask=np.bitwise_or)\n    print(f"   Result mask:")\n    print(f"   {result.mask}")\n\n    print("\\n
+5. multiply mask by no mask (mask * no mask)")\n    result = nref_mask.multiply(nref_nomask, handle_mask=np.bitwise_or)\n    print(f"   Result mask:")\n    print(f"   {result.mask}")\n\n    print("\\n✅ All examples from the GitHub issue work correctly!")\n\nif __name__ == "__main__":\n    test_github_issue_examples()'})
+
+
+## Step 24
+
+### 🤔 Thinking
+Now let me run the test to make sure the exact issue from the GitHub issue is fixed:
+
+### 🎯 Action
+bash({'command': 'cd . && python test_github_issue.py'})
+
+
+## Step 25
+
+### 🤔 Thinking
+Perfect! The fix is working correctly. All examples from the GitHub issue are now working as expected. The two previously failing cases (3 and 5) now return the correct mask instead of raising a TypeError.
+
+Let me create one more comprehensive test that tests edge cases and variations to make sure the fix is robust:
+
+### 👁️ Observation
+Excellent! The fix is working perfectly. Let me create one more comprehensive test with edge cases:
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'create', 'path': './test_comprehensive.py', 'file_text': '#!/usr/bin/env python3\n"""\nComprehensive test for the NDDataRef mask propagation fix.\n"""\n\nimport numpy as np\nfrom astropy.nddata import NDDataRef\n\ndef test_comprehensive_mask_propagation():\n    """Test comprehensive mask propagation scenarios."""\n    print("=== Comprehensive NDDataRef mask propagation test ===")\n    \n    # Setup test data\n    array = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]])\n    mask1 = np.array([[0, 1, 64], [8, 0, 1], [2, 1, 0]])\n    mask2 = np.array([[1, 0, 32], [4, 1, 0], [1, 0, 1]])\n    \n    # Create test objects\n    nref_nomask = NDDataRef(array)\n    nref_mask1 = NDDataRef(array, mask=mask1)\n    nref_mask2 = NDDataRef(array, mask=mask2)\n    \n    print(f"nref_nomask.mask: {nref_nomask.mask}")\n    print(f"nref_mask1.mask:\\n{nref_mask1.mask}")\n    print(f"nref_mask2.mask:\\n{nref_mask2.mask}")\n    \n    # Test all operations with different handle_mask functions\n    operations = [\n        ("multiply", lambda x, y, **kwargs: x.multiply(y, **kwargs)),\n        ("add", lambda x, y, **kwargs: x.add(y, **kwargs)),\n        ("subtract", lambda x, y, **kwargs: x.subtract(y, **kwargs)),\n        ("divide", lambda x, y, **kwargs: x.divide(y, **kwargs)),\n    ]\n    \n    handle_mask_functions = [\n        ("np.bitwise_or", np.bitwise_or),\n        ("np.bitwise_and", np.bitwise_and),\n        ("np.bitwise_xor", np.bitwise_xor),\n        ("np.logical_or", np.logical_or),\n        ("np.logical_and", np.logical_and),\n    ]\n    \n    test_cases = [\n        ("nomask", "nomask", nref_nomask, nref_nomask),\n        ("nomask", "mask1", nref_nomask, nref_mask1),\n        ("mask1", "nomask", nref_mask1, nref_nomask),\n        ("mask1", "mask1", nref_mask1, nref_mask1),\n        ("mask1", "mask2", nref_mask1, nref_mask2),\n        ("mask1", "scalar", nref_mask1, 1.0),\n        ("nomask", "scalar", nref_nomask, 1.0),\n    ]\n    \n    for op_name, op_func in operations:\n        print(f"\\n--- Testing {op_name} operation ---")\n        for handle_name, handle_func in handle_mask_functions:\n            print(f"  Using handle_mask={handle_name}")\n            for desc1, desc2, obj1, obj2 in test_cases:\n                test_desc = f"{desc1} {op_name} {desc2}"\n                try:\n                    result = op_func(obj1, obj2, handle_mask=handle_func)\n                    if result.mask is None:\n                        print(f"    {test_desc}: SUCCESS (mask=None)")\n                    else:\n                        print(f"    {test_desc}: SUCCESS (mask shape={result.mask.shape})")\n                except Exception as e:\n                    print(f"    {test_desc}: ERROR - {type(e).__name__}: {e}")\n    \n    # Test with None operand to ensure collapse operations work\n    print(f"\\n--- Testing collapse operations with handle_mask=np.bitwise_or ---")\n    collapse_ops = [\n        ("sum", lambda x, **kwargs: x.sum(**kwargs)),\n        ("mean", lambda x, **kwargs: x.mean(**kwargs)),\n        ("min", lambda x, **kwargs: x.min(**kwargs)),\n        ("max", lambda x, **kwargs: x.max(**kwargs)),\n    ]\n    \n    for op_name, op_func in collapse_ops:\n        try:\n            result = op_func(nref_mask1, handle_mask=np.bitwise_or)\n            print(f"  {op_name} with mask: SUCCESS (result={result.data})")\n        except Exception as e:\n            print(f"  {op_name} with mask: ERROR - {type(e).__name__}: {e}")\n    \n    print("\\n✅ Comprehensive test completed!")\n\nif __name__ == "__main__":\n    test_comprehensive_mask_propagation()'})
+
+
+## Step 26
+
+### 🤔 Thinking
+Let me run the comprehensive test to make sure the fix is robust across different scenarios:
+
+### 🎯 Action
+bash({'command': 'cd . && python test_comprehensive.py'})
+
+
+## Step 27
+
+### 🤔 Thinking
+Perfect! The comprehensive test shows that the fix works correctly across:
+
+
+1. **All arithmetic operations**: multiply, add, subtract, divide
+
+2. **All handle_mask functions**: np.bitwise_or, np.bitwise_and, np.bitwise_xor, np.logical_or, np.logical_and
+
+3. **All mask combinations**: nomask-nomask, nomask-mask, mask-nomask, mask-mask, mask-scalar, nomask-scalar
+
+4. **Collapse operations**: sum, mean, min, max
+
+The fix is working comprehensively without any errors or exceptions. The runtime warning about division by zero is expected and not related to the mask propagation fix.
+
+The verification counter: 8 steps completed. I've successfully tested the implementation and confirmed it works correctly.
+
+### 👁️ Observation
+Perfect! The comprehensive test shows that the fix is working correctly across all scenarios. The verification is complete.
+
+## 
+3. FINAL REVIEW
+
+### 🎯 Action
+str_replace_based_edit_tool({'command': 'view', 'path': './astropy/nddata/mixins/ndarithmetic.py', 'view_range': [520, 532]})
+
+
+## Step 28
+
+### 🤔 Thinking
+Let me run the existing tests one final time to ensure that everything still passes:
+
+### 👁️ Observation
+Let me run one final test to make sure everything is working:
+
+### 🎯 Action
+bash({'command': 'cd . && python -m pytest astropy/nddata/mixins/tests/test_ndarithmetic.py::test_arithmetics_data_masks -v'})
+
+
+## Step 29
+
+### 🤔 Thinking
+Perfect! All mask-related tests pass. The implementation is working correctly. Let me now summarize what I have accomplished:
+
+**Summary of Fix:**
+
+
+1. **Problem**: The `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py` had incomplete conditional logic that failed to handle the case where `self.mask` is not None but `operand.mask` is None, causing a TypeError when using `handle_mask=np.bitwise_or`.
+
+
+2. **Solution**: Added a missing conditional branch at lines 526-528 that handles the case where `operand is not None and operand.mask is None` by returning `deepcopy(self.mask)`.
+
+
+3. **Testing**: Successfully verified the fix works across:
+   - All arithmetic operations (multiply, add, subtract, divide)
+   - All handle_mask functions (np.bitwise_or, np.bitwise_and, np.bitwise_xor, np.logical_or, np.logical_and)
+   - All mask combinations (nomask-nomask, nomask-mask, mask-nomask, mask-mask, mask-scalar, nomask-scalar)
+   - All existing tests still pass (179 tests for ndarithmetic, 219 tests for nddata)
+
+The fix is minimal, surgical, and follows existing code patterns. It addresses the exact root cause without changing any other logic or interfaces.
+
+### 👁️ Observation
+Perfect! The fix is working correctly. Let me do a final verification by running the reproduction script once more to confirm the issue is resolved:
+
+### 🎯 Action
+bash({'command': 'cd . && python reproduction.py'})
+
+
+## Step 30
+
+### 🤔 Thinking
+Perfect! The fix is working completely. All test cases are passing, including the two originally failing cases:
+
+
+1. `mask * scalar` - now SUCCESS instead of TypeError
+
+2. `mask * no mask` - now SUCCESS instead of TypeError
+
+The fix has been successfully implemented and thoroughly tested. Let me summarize what was accomplished:
+
+## Summary
+
+**Problem**: In astropy v5.3, NDDataRef mask propagation failed when one operand had a mask and the other didn't during arithmetic operations with `handle_mask=np.bitwise_or`, causing a TypeError.
+
+**Root Cause**: The `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py` had incomplete conditional logic that failed to handle the case where `self.mask` is not None but `operand.mask` is None.
+
+**Solution**: Added a missing conditional branch at lines 526-528:
+
+
+```python
+elif operand is not None and operand.mask is None:
+    # Make a copy so there is no reference in the result.
+    return deepcopy(self.mask)
+
+
+```
+
+**Verification**: The fix was verified to work correctly across:
+- All arithmetic operations (multiply, add, subtract, divide)
+- All handle_mask functions (np.bitwise_or, np.bitwise_and, np.bitwise_xor, np.logical_or, np.logical_and)
+- All mask combinations (nomask-nomask, nomask-mask, mask-nomask, mask-mask, mask-scalar, nomask-scalar)
+- All existing tests still pass (179 tests for ndarithmetic, 219 tests for nddata)
+
+The fix is minimal, surgical, and follows existing code patterns. It addresses the exact root cause without changing any other logic or interfaces.
+
+### 📋 Conclusion
+## Summary
+
+I have successfully implemented and thoroughly tested the fix for the NDDataRef mask propagation issue. Here's what was accomplished:
+
+### **Problem Analysis**
+- **Root Cause**: The `_arithmetic_mask` method in `astropy/nddata/mixins/ndarithmetic.py` had incomplete conditional logic that failed to handle the case where `self.mask` is not None but `operand.mask` is None
+- **Impact**: When using `handle_mask=np.bitwise_or` with operations like `nref_mask.multiply(1.)`, the code would call `np.bitwise_or(mask_array, None)` which resulted in a TypeError
+
+### **Solution Implemented**
+- Added a missing conditional branch at lines 526-528 in the `_arithmetic_mask` method:
+
+
+```python
+elif operand is not None and operand.mask is None:
+    # Make a copy so there is no reference in the result.
+    return deepcopy(self.mask)
+
+
+```
+
+### **Fix Characteristics**
+- **Minimal**: Only adds the missing conditional case, doesn't change existing logic
+- **Surgical**: Addresses the exact root cause without broader refactoring
+- **Pattern-consistent**: Uses the same deepcopy pattern as existing conditional branches
+- **Interface-preserving**: Doesn't change method signatures or return types
+
+### **Comprehensive Testing**
+✅ **Original issue examples**: All 5 cases from the GitHub issue now work correctly  
+✅ **All arithmetic operations**: multiply, add, subtract, divide  
+✅ **All handle_mask functions**: np.bitwise_or, np.bitwise_and, np.bitwise_xor, np.logical_or, np.logical_and  
+✅ **All mask combinations**: nomask-nomask, nomask-mask, mask-nomask, mask-mask, mask-scalar, nomask-scalar  
+✅ **Existing tests**: All 179 ndarithmetic tests + 219 nddata tests still pass  
+✅ **Collapse operations**: sum, mean, min, max work correctly  
+
+### **Result**
+The previously failing cases now work correctly:
+- `nref_mask.multiply(1., handle_mask=np.bitwise_or)` → **SUCCESS** (returns mask)
+- `nref_mask.multiply(nref_nomask, handle_mask=np.bitwise_or)` → **SUCCESS** (returns mask)
+
+The fix resolves the TypeError while maintaining full backward compatibility and preserving all existing functionality.
+
+
+The final patch is:
+diff --git a/astropy/nddata/mixins/ndarithmetic.py b/astropy/nddata/mixins/ndarithmetic.py
+index 4153dfccb2..98bc0f569c 100644
+--- a/astropy/nddata/mixins/ndarithmetic.py
++++ b/astropy/nddata/mixins/ndarithmetic.py
+@@ -522,6 +522,9 @@ class NDArithmeticMixin:
+             return deepcopy(operand.mask)
+         elif operand is None:
+             return deepcopy(self.mask)
++        elif operand is not None and operand.mask is None:
++            # Make a copy so there is no reference in the result.
++            return deepcopy(self.mask)
+         else:
+             # Now lets calculate the resulting mask (operation enforces copy)
+             return handle_mask(self.mask, operand.mask, **kwds)
+</problem_solver 0>

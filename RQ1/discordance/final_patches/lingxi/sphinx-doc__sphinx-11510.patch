@@ -1,0 +1,82 @@
+diff --git a/sphinx/directives/other.py b/sphinx/directives/other.py
+index 19f7c0a8d..8b1f766cb 100644
+--- a/sphinx/directives/other.py
++++ b/sphinx/directives/other.py
+@@ -1,6 +1,8 @@
+ from __future__ import annotations
+ 
++import contextlib
+ import re
++import tempfile
+ from typing import TYPE_CHECKING, Any, cast
+ 
+ from docutils import nodes
+@@ -368,15 +370,66 @@ class Include(BaseInclude, SphinxDirective):
+     "correctly", i.e. relative to source directory.
+     """
+ 
++    def _read_and_process_content(self, filename: str) -> str:
++        """Read file content and apply source-read event processing."""
++        # Read the file content using the same approach as docutils BaseInclude
++        # This ensures we handle encodings correctly
++        from docutils.io import FileInput
++        source = FileInput(source_path=filename)
++        content = source.read()
++        
++        # Apply source-read event processing using the same pattern as SphinxStandaloneReader
++        # Create a docname for the included file (similar to how Sphinx handles it)
++        rel_filename = self.env.relfn2path(self.arguments[0])[0]
++        
++        # Emit source-read event to allow extensions to modify content
++        arg = [content]
++        self.env.events.emit('source-read', rel_filename, arg)
++        
++        return arg[0]
++
++    @contextlib.contextmanager
++    def _temporary_file_with_content(self, content: str):
++        """Create a temporary file with the given content."""
++        # Create a temporary file with the processed content
++        with tempfile.NamedTemporaryFile(mode='w', suffix='.rst', delete=False, encoding='utf-8') as temp_file:
++            temp_file.write(content)
++            temp_filename = temp_file.name
++        
++        try:
++            yield temp_filename
++        finally:
++            # Clean up the temporary file
++            import os
++            try:
++                os.unlink(temp_filename)
++            except OSError:
++                pass  # ignore cleanup errors
++
+     def run(self) -> list[Node]:
+         if self.arguments[0].startswith('<') and \
+            self.arguments[0].endswith('>'):
+             # docutils "standard" includes, do not do path processing
+             return super().run()
++        
+         rel_filename, filename = self.env.relfn2path(self.arguments[0])
+-        self.arguments[0] = filename
+         self.env.note_included(filename)
+-        return super().run()
++        
++        # Read and process the file content through source-read event
++        processed_content = self._read_and_process_content(filename)
++        
++        # Create temporary file with processed content and use it for BaseInclude
++        with self._temporary_file_with_content(processed_content) as temp_filename:
++            # Temporarily replace the filename with our processed version
++            original_filename = self.arguments[0]
++            self.arguments[0] = temp_filename
++            try:
++                result = super().run()
++            finally:
++                # Restore original filename
++                self.arguments[0] = original_filename
++            
++        return result
+ 
+ 
+ def setup(app: Sphinx) -> dict[str, Any]:

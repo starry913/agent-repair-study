@@ -1,0 +1,59 @@
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index 59a5d6abbb..08ddf06ac3 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -1854,7 +1854,24 @@ class SQLUpdateCompiler(SQLCompiler):
+             for rows in query.get_compiler(self.using).execute_sql(MULTI):
+                 idents.extend(r[0] for r in rows)
+             self.query.add_filter("pk__in", idents)
+-            self.query.related_ids = idents
++            
++            # For multiple inheritance, collect parent-specific IDs
++            if self.query.related_updates:
++                parent_ids_dict = {}
++                for parent_model in self.query.related_updates:
++                    parent_link_field = self.query.model._meta.parents.get(parent_model)
++                    if parent_link_field:
++                        # Create a new query to get parent-specific IDs
++                        parent_id_query = query.chain()
++                        parent_id_query.clear_select_clause()
++                        parent_id_query.add_fields([parent_link_field.name])
++                        parent_ids = []
++                        for rows in parent_id_query.get_compiler(self.using).execute_sql(MULTI):
++                            parent_ids.extend(r[0] for r in rows)
++                        parent_ids_dict[parent_model] = parent_ids
++                self.query.related_ids = parent_ids_dict
++            else:
++                self.query.related_ids = {}
+         else:
+             # The fast path. Filters and updates in one query.
+             self.query.add_filter("pk__in", query)
+diff --git a/django/db/models/sql/subqueries.py b/django/db/models/sql/subqueries.py
+index 04063f73bc..7ed39e0619 100644
+--- a/django/db/models/sql/subqueries.py
++++ b/django/db/models/sql/subqueries.py
+@@ -60,12 +60,13 @@ class UpdateQuery(Query):
+         would normally be set in __init__() should go here instead.
+         """
+         self.values = []
+-        self.related_ids = None
++        self.related_ids = {}
+         self.related_updates = {}
+ 
+     def clone(self):
+         obj = super().clone()
+         obj.related_updates = self.related_updates.copy()
++        obj.related_ids = self.related_ids.copy()
+         return obj
+ 
+     def update_batch(self, pk_list, values, using):
+@@ -133,8 +134,8 @@ class UpdateQuery(Query):
+         for model, values in self.related_updates.items():
+             query = UpdateQuery(model)
+             query.values = values
+-            if self.related_ids is not None:
+-                query.add_filter("pk__in", self.related_ids)
++            if self.related_ids:
++                query.add_filter("pk__in", self.related_ids.get(model, []))
+             result.append(query)
+         return result

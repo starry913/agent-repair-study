@@ -1,0 +1,245 @@
+diff --git a/django/utils/timesince.py b/django/utils/timesince.py
+index 3a0d4afb1a..701c49bab9 100644
+--- a/django/utils/timesince.py
++++ b/django/utils/timesince.py
+@@ -1,4 +1,3 @@
+-import calendar
+ import datetime
+
+ from django.utils.html import avoid_wrapping
+@@ -14,14 +13,16 @@ TIME_STRINGS = {
+     "minute": ngettext_lazy("%(num)d minute", "%(num)d minutes", "num"),
+ }
+
+-TIMESINCE_CHUNKS = (
+-    (60 * 60 * 24 * 365, "year"),
+-    (60 * 60 * 24 * 30, "month"),
+-    (60 * 60 * 24 * 7, "week"),
+-    (60 * 60 * 24, "day"),
+-    (60 * 60, "hour"),
+-    (60, "minute"),
+-)
++TIME_STRINGS_KEYS = list(TIME_STRINGS.keys())
++
++TIME_CHUNKS = [
++    60 * 60 * 24 * 7,  # week
++    60 * 60 * 24,  # day
++    60 * 60,  # hour
++    60,  # minute
++]
++
++MONTHS_DAYS = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+
+
+ def timesince(d, now=None, reversed=False, time_strings=None, depth=2):
+@@ -31,9 +32,16 @@ def timesince(d, now=None, reversed=False, time_strings=None, depth=2):
+     "0 minutes".
+
+     Units used are years, months, weeks, days, hours, and minutes.
+-    Seconds and microseconds are ignored. Up to `depth` adjacent units will be
+-    displayed.  For example, "2 weeks, 3 days" and "1 year, 3 months" are
+-    possible outputs, but "2 weeks, 3 hours" and "1 year, 5 days" are not.
++    Seconds and microseconds are ignored.
++
++    The algorithm takes into account the varying duration of years and months.
++    There is exactly "1 year, 1 month" between 2013/02/10 and 2014/03/10,
++    but also between 2007/08/10 and 2008/09/10 despite the delta being 393 days
++    in the former case and 397 in the latter.
++
++    Up to `depth` adjacent units will be displayed.  For example,
++    "2 weeks, 3 days" and "1 year, 3 months" are possible outputs, but
++    "2 weeks, 3 hours" and "1 year, 5 days" are not.
+
+     `time_strings` is an optional dict of strings to replace the default
+     TIME_STRINGS dict.
+@@ -41,8 +49,9 @@ def timesince(d, now=None, reversed=False, time_strings=None, depth=2):
+     `depth` is an optional integer to control the number of adjacent time
+     units returned.
+
+-    Adapted from
++    Originally adapted from
+     https://web.archive.org/web/20060617175230/http://blog.natbat.co.uk/archive/2003/Jun/14/time_since
++    Modified to improve results for years and months.
+     """
+     if time_strings is None:
+         time_strings = TIME_STRINGS
+@@ -60,37 +69,64 @@ def timesince(d, now=None, reversed=False, time_strings=None, depth=2):
+         d, now = now, d
+     delta = now - d
+
+-    # Deal with leapyears by subtracing the number of leapdays
+-    leapdays = calendar.leapdays(d.year, now.year)
+-    if leapdays != 0:
+-        if calendar.isleap(d.year):
+-            leapdays -= 1
+-        elif calendar.isleap(now.year):
+-            leapdays += 1
+-    delta -= datetime.timedelta(leapdays)
+-
+-    # ignore microseconds
++    # Ignore microseconds.
+     since = delta.days * 24 * 60 * 60 + delta.seconds
+     if since <= 0:
+         # d is in the future compared to now, stop processing.
+         return avoid_wrapping(time_strings["minute"] % {"num": 0})
+-    for i, (seconds, name) in enumerate(TIMESINCE_CHUNKS):
+-        count = since // seconds
+-        if count != 0:
++
++    # Get years and months.
++    total_months = (now.year - d.year) * 12 + (now.month - d.month)
++    if d.day > now.day or (d.day == now.day and d.time() > now.time()):
++        total_months -= 1
++    years, months = divmod(total_months, 12)
++
++    # Calculate the remaining time.
++    # Create a "pivot" datetime shifted from d by years and months, then use
++    # that to determine the other parts.
++    if years or months:
++        pivot_year = d.year + years
++        pivot_month = d.month + months
++        if pivot_month > 12:
++            pivot_month -= 12
++            pivot_year += 1
++        pivot = datetime.datetime(
++            pivot_year,
++            pivot_month,
++            min(MONTHS_DAYS[pivot_month - 1], d.day),
++            d.hour,
++            d.minute,
++            d.second,
++        )
++    else:
++        pivot = d
++    remaining_time = (now - pivot).total_seconds()
++    partials = [years, months]
++    for chunk in TIME_CHUNKS:
++        count = remaining_time // chunk
++        partials.append(count)
++        remaining_time -= chunk * count
++
++    # Find the first non-zero part (if any) and then build the result, until
++    # depth.
++    i = 0
++    for i, value in enumerate(partials):
++        if value != 0:
+             break
+     else:
+         return avoid_wrapping(time_strings["minute"] % {"num": 0})
++
+     result = []
+     current_depth = 0
+-    while i < len(TIMESINCE_CHUNKS) and current_depth < depth:
+-        seconds, name = TIMESINCE_CHUNKS[i]
+-        count = since // seconds
+-        if count == 0:
++    while i < len(TIME_STRINGS_KEYS) and current_depth < depth:
++        value = partials[i]
++        if value == 0:
+             break
+-        result.append(avoid_wrapping(time_strings[name] % {"num": count}))
+-        since -= seconds * count
++        name = TIME_STRINGS_KEYS[i]
++        result.append(avoid_wrapping(time_strings[name] % {"num": value}))
+         current_depth += 1
+         i += 1
++
+     return gettext(", ").join(result)
+
+
+diff --git a/tests/humanize_tests/tests.py b/tests/humanize_tests/tests.py
+index 432314f795..cf29f58232 100644
+--- a/tests/humanize_tests/tests.py
++++ b/tests/humanize_tests/tests.py
+@@ -506,8 +506,8 @@ class HumanizeTests(SimpleTestCase):
+             # "%(delta)s from now" translations
+             now + datetime.timedelta(days=1),
+             now + datetime.timedelta(days=2),
+-            now + datetime.timedelta(days=30),
+-            now + datetime.timedelta(days=60),
++            now + datetime.timedelta(days=31),
++            now + datetime.timedelta(days=61),
+             now + datetime.timedelta(days=500),
+             now + datetime.timedelta(days=865),
+         ]
+diff --git a/tests/template_tests/filter_tests/test_timesince.py b/tests/template_tests/filter_tests/test_timesince.py
+index 10e4e51d89..d623449e00 100644
+--- a/tests/template_tests/filter_tests/test_timesince.py
++++ b/tests/template_tests/filter_tests/test_timesince.py
+@@ -147,6 +147,23 @@ class TimesinceTests(TimezoneTestCase):
+         )
+         self.assertEqual(output, "1\xa0day")
+
++    # Tests for #33879 (wrong results for 11 months + several weeks).
++    @setup({"timesince19": "{{ earlier|timesince }}"})
++    def test_timesince19(self):
++        output = self.engine.render_to_string(
++            "timesince19", {"earlier": self.today - timedelta(days=358)}
++        )
++        self.assertEqual(output, "11\xa0months, 3\xa0weeks")
++
++    @setup({"timesince20": "{{ a|timesince:b }}"})
++    def test_timesince20(self):
++        now = datetime(2018, 5, 9)
++        output = self.engine.render_to_string(
++            "timesince20",
++            {"a": now, "b": now + timedelta(days=365) + timedelta(days=364)},
++        )
++        self.assertEqual(output, "1\xa0year, 11\xa0months")
++
+
+ class FunctionTests(SimpleTestCase):
+     def test_since_now(self):
+diff --git a/tests/utils_tests/test_timesince.py b/tests/utils_tests/test_timesince.py
+index 4ab8e49e8d..bf05f32f5e 100644
+--- a/tests/utils_tests/test_timesince.py
++++ b/tests/utils_tests/test_timesince.py
+@@ -16,8 +16,8 @@ class TimesinceTests(TestCase):
+         self.onehour = datetime.timedelta(hours=1)
+         self.oneday = datetime.timedelta(days=1)
+         self.oneweek = datetime.timedelta(days=7)
+-        self.onemonth = datetime.timedelta(days=30)
+-        self.oneyear = datetime.timedelta(days=365)
++        self.onemonth = datetime.timedelta(days=31)
++        self.oneyear = datetime.timedelta(days=366)
+
+     def test_equal_datetimes(self):
+         """equal datetimes."""
+@@ -205,6 +205,37 @@ class TimesinceTests(TestCase):
+                 self.assertEqual(timesince(self.t, value, depth=depth), expected)
+                 self.assertEqual(timeuntil(value, self.t, depth=depth), expected)
+
++    def test_months_edge(self):
++        t = datetime.datetime(2022, 1, 1)
++        tests = [
++            (datetime.datetime(2022, 1, 31), "4\xa0weeks, 2\xa0days"),
++            (datetime.datetime(2022, 2, 1), "1\xa0month"),
++            (datetime.datetime(2022, 2, 28), "1\xa0month, 3\xa0weeks"),
++            (datetime.datetime(2022, 3, 1), "2\xa0months"),
++            (datetime.datetime(2022, 3, 31), "2\xa0months, 4\xa0weeks"),
++            (datetime.datetime(2022, 4, 1), "3\xa0months"),
++            (datetime.datetime(2022, 4, 30), "3\xa0months, 4\xa0weeks"),
++            (datetime.datetime(2022, 5, 1), "4\xa0months"),
++            (datetime.datetime(2022, 5, 31), "4\xa0months, 4\xa0weeks"),
++            (datetime.datetime(2022, 6, 1), "5\xa0months"),
++            (datetime.datetime(2022, 6, 30), "5\xa0months, 4\xa0weeks"),
++            (datetime.datetime(2022, 7, 1), "6\xa0months"),
++            (datetime.datetime(2022, 7, 31), "6\xa0months, 4\xa0weeks"),
++            (datetime.datetime(2022, 8, 1), "7\xa0months"),
++            (datetime.datetime(2022, 8, 31), "7\xa0months, 4\xa0weeks"),
++            (datetime.datetime(2022, 9, 1), "8\xa0months"),
++            (datetime.datetime(2022, 9, 30), "8\xa0months, 4\xa0weeks"),
++            (datetime.datetime(2022, 10, 1), "9\xa0months"),
++            (datetime.datetime(2022, 10, 31), "9\xa0months, 4\xa0weeks"),
++            (datetime.datetime(2022, 11, 1), "10\xa0months"),
++            (datetime.datetime(2022, 11, 30), "10\xa0months, 4\xa0weeks"),
++            (datetime.datetime(2022, 12, 1), "11\xa0months"),
++            (datetime.datetime(2022, 12, 31), "11\xa0months, 4\xa0weeks"),
++        ]
++        for value, expected in tests:
++            with self.subTest():
++                self.assertEqual(timesince(t, value), expected)
++
+     def test_depth_invalid(self):
+         msg = "depth must be greater than 0."
+         with self.assertRaisesMessage(ValueError, msg):
