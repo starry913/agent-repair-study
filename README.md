@@ -2,7 +2,7 @@
 
 **An empirical study of subtask outcomes, historical context, and feedback loops in agentic program repair.**
 
-**Qiyang Li** · [GitHub](https://github.com/starry913) · [Website](https://starry913.github.io/)
+**Qiyang Li**
 
 Software agents can arrive at the same benchmark result through very different repair processes. A final success rate does not reveal where useful evidence emerges, how earlier localization informs later edits, or why repeated validation and refinement sometimes fail to produce a successful patch.
 
